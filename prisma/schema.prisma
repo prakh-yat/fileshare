@@ -1,0 +1,110 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model AppUser {
+  id                  String         @id @default(cuid())
+  supabaseUserId      String         @unique
+  email               String?
+  emailNormalized     String?        @unique
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  ghlConnection       GhlConnection?
+  ownedMediaObjects   MediaObject[]  @relation("OwnedMediaObjects")
+  sentMediaShares     MediaShare[]   @relation("SentMediaShares")
+  receivedMediaShares MediaShare[]   @relation("ReceivedMediaShares")
+}
+
+model GhlConnection {
+  id                    String    @id @default(cuid())
+  userId                String    @unique
+  user                  AppUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessTokenEncrypted  String    @db.Text
+  refreshTokenEncrypted String?   @db.Text
+  tokenType             String    @default("Bearer")
+  scope                 String?   @db.Text
+  refreshTokenId        String?
+  userType              String?
+  companyId             String?
+  locationId            String?
+  externalUserId        String?
+  isBulkInstallation    Boolean?
+  expiresAt             DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([locationId])
+}
+
+model GhlAppConnection {
+  id                    String    @id
+  accessTokenEncrypted  String    @db.Text
+  refreshTokenEncrypted String?   @db.Text
+  tokenType             String    @default("Bearer")
+  scope                 String?   @db.Text
+  refreshTokenId        String?
+  userType              String?
+  companyId             String?
+  locationId            String?
+  externalUserId        String?
+  isBulkInstallation    Boolean?
+  expiresAt             DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([locationId])
+}
+
+enum MediaObjectType {
+  FILE
+  FOLDER
+}
+
+model MediaObject {
+  id           String          @id @default(cuid())
+  ghlId        String          @unique
+  type         MediaObjectType
+  name         String
+  ownerId      String
+  owner        AppUser         @relation("OwnedMediaObjects", fields: [ownerId], references: [id], onDelete: Cascade)
+  parentId     String?
+  parent       MediaObject?    @relation("MediaFolderChildren", fields: [parentId], references: [id], onDelete: SetNull)
+  children     MediaObject[]   @relation("MediaFolderChildren")
+  url          String?         @db.Text
+  thumbnailUrl String?         @db.Text
+  mimeType     String?
+  size         Int?
+  raw          Json?
+  ghlCreatedAt DateTime?
+  ghlUpdatedAt DateTime?
+  isDeleted    Boolean         @default(false)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  shares       MediaShare[]
+
+  @@index([ownerId, parentId, isDeleted])
+  @@index([parentId])
+  @@index([type])
+}
+
+model MediaShare {
+  id              String      @id @default(cuid())
+  mediaObjectId   String
+  mediaObject     MediaObject @relation(fields: [mediaObjectId], references: [id], onDelete: Cascade)
+  sharedById      String
+  sharedBy        AppUser     @relation("SentMediaShares", fields: [sharedById], references: [id], onDelete: Cascade)
+  sharedWithId    String?
+  sharedWith      AppUser?    @relation("ReceivedMediaShares", fields: [sharedWithId], references: [id], onDelete: SetNull)
+  sharedWithEmail String
+  createdAt       DateTime    @default(now())
+
+  @@unique([mediaObjectId, sharedWithEmail])
+  @@index([sharedWithEmail])
+  @@index([sharedWithId])
+}
