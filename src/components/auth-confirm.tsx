@@ -51,7 +51,9 @@ export function AuthConfirm() {
         return;
       }
       if (!result.data.session) {
-        if (mounted) setError("This magic link is missing a valid auth session. Send a new link.");
+        if (mounted) {
+          setError("This confirmation link is missing a valid auth session. Try creating your account again.");
+        }
         return;
       }
 
@@ -74,13 +76,13 @@ export function AuthConfirm() {
             <div className="mx-auto grid h-12 w-12 place-items-center rounded-[8px] bg-red-50 text-red-600">
               <AlertCircle className="h-6 w-6" aria-hidden="true" />
             </div>
-            <h1 className="mt-4 text-xl font-semibold">Magic link could not be verified</h1>
+            <h1 className="mt-4 text-xl font-semibold">Email confirmation could not be verified</h1>
             <p className="mt-2 text-sm leading-6 text-slate-600">{error}</p>
             <a
               href="/login"
               className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-blue-600 px-4 text-sm font-semibold text-white transition hover:bg-blue-700"
             >
-              Send a new link
+              Back to login
             </a>
           </>
         ) : (
@@ -88,9 +90,9 @@ export function AuthConfirm() {
             <div className="mx-auto grid h-12 w-12 place-items-center rounded-[8px] bg-blue-50 text-blue-600">
               <Loader2 className="h-6 w-6 animate-spin" aria-hidden="true" />
             </div>
-            <h1 className="mt-4 text-xl font-semibold">Signing you in</h1>
+            <h1 className="mt-4 text-xl font-semibold">Confirming your account</h1>
             <p className="mt-2 text-sm leading-6 text-slate-600">
-              Verifying your magic link and opening the dashboard.
+              Verifying your email and opening the dashboard.
             </p>
           </>
         )}

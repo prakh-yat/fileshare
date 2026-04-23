@@ -1,6 +1,6 @@
 # TDA FileShare
 
-Private media manager built with Next.js App Router, Supabase magic-link auth,
+Private media manager built with Next.js App Router, Supabase email/password auth,
 Prisma/Postgres, and Go High Level Media Storage.
 
 `/` redirects to `/login`. Authenticated users land on `/dashboard` and stay
@@ -38,16 +38,13 @@ Generate the encryption key with:
 openssl rand -base64 32
 ```
 
-## Redirect URLs
+## Auth Redirect URLs
 
-Add these while developing locally:
+If email confirmation is enabled in Supabase, add this while developing locally:
 
 ```text
-Supabase Auth redirect URL:
+Supabase email confirmation redirect URL:
 http://localhost:3000/auth/confirm
-
-Optional legacy Supabase callback URL:
-http://localhost:3000/auth/callback
 
 GHL Marketplace OAuth redirect URL:
 http://localhost:3000/api/oauth/callback
@@ -97,7 +94,7 @@ Open [http://localhost:3000](http://localhost:3000). It will redirect to
 
 ## Media Features
 
-- Supabase passwordless magic-link sign-in
+- Supabase email/password sign-in and account creation
 - Persistent Supabase browser sessions with server-side refresh through Next proxy
 - Admin-only GHL OAuth authorization-code flow with client credentials sent in the token body
 - Encrypted app-wide GHL access and refresh token storage
