@@ -4,6 +4,7 @@ import Image from "next/image";
 import { useState } from "react";
 import { CheckCircle2, Loader2, Mail } from "lucide-react";
 
+import { getPublicAppUrl } from "@/lib/env";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 
 export function LoginForm({ initialError }: { initialError?: string }) {
@@ -20,12 +21,12 @@ export function LoginForm({ initialError }: { initialError?: string }) {
 
     try {
       const supabase = createSupabaseBrowserClient();
-      const origin = window.location.origin;
+      const appUrl = getPublicAppUrl(window.location.origin);
       const { error: signInError } = await supabase.auth.signInWithOtp({
         email,
         options: {
           shouldCreateUser: true,
-          emailRedirectTo: `${origin}/auth/confirm?next=/dashboard`,
+          emailRedirectTo: `${appUrl}/auth/confirm?next=/dashboard`,
         },
       });
 

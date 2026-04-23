@@ -9,5 +9,15 @@ export function getEnv(name: string, fallback?: string) {
 }
 
 export function getPublicAppUrl(origin?: string | null) {
-  return process.env.NEXT_PUBLIC_APP_URL || origin || "http://localhost:3000";
+  const configuredUrl = process.env.NEXT_PUBLIC_APP_URL?.trim();
+
+  if (configuredUrl) {
+    return configuredUrl.replace(/\/$/, "");
+  }
+
+  if (origin) {
+    return origin.replace(/\/$/, "");
+  }
+
+  return "http://localhost:3000";
 }

@@ -1,6 +1,7 @@
 import type { GhlAppConnection } from "@prisma/client";
 
 import { decryptSecret, encryptSecret } from "@/lib/crypto";
+import { getPublicAppUrl } from "@/lib/env";
 import { getGhlConfig } from "@/lib/ghl/config";
 import { getPrisma } from "@/lib/prisma";
 
@@ -38,8 +39,7 @@ type AuthorizedGhlContext = {
 const APP_CONNECTION_ID = "primary";
 
 export function getGhlRedirectUri(origin?: string | null) {
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || origin || "http://localhost:3000";
-  return `${appUrl.replace(/\/$/, "")}/api/oauth/callback`;
+  return `${getPublicAppUrl(origin)}/api/oauth/callback`;
 }
 
 export async function exchangeAuthorizationCode(code: string, redirectUri: string) {
