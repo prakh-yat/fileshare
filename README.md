@@ -30,6 +30,17 @@ GHL_USER_TYPE=Location
 GHL_ADMIN_EMAILS=admin@example.com
 GHL_SCOPES=medias.readonly medias.write locations.readonly oauth.readonly oauth.write
 GHL_DEFAULT_LOCATION_ID=
+
+SUPABASE_ACCESS_TOKEN=
+SUPABASE_PROJECT_REF=
+SUPABASE_AUTH_SITE_URL=http://localhost:3000
+SUPABASE_SMTP_ADMIN_EMAIL=auth@mail.cpmaustralia.com
+SUPABASE_SMTP_HOST=smtp.mailgun.org
+SUPABASE_SMTP_PORT=587
+SUPABASE_SMTP_USER=auth@mail.cpmaustralia.com
+SUPABASE_SMTP_PASS=your-smtp-password
+SUPABASE_SMTP_SENDER_NAME=TDA FileShare
+SUPABASE_AUTH_EMAIL_RATE_LIMIT_PER_HOUR=100
 ```
 
 Generate the encryption key with:
@@ -51,6 +62,35 @@ http://localhost:3000/api/oauth/callback
 ```
 
 For production, replace `http://localhost:3000` with your deployed app URL.
+
+## Supabase Auth SMTP
+
+Supabase sends account confirmation, password reset, invite, and email-change
+messages from the Supabase Auth service, so the custom SMTP server has to be
+configured on the Supabase project rather than in the login form.
+
+Set the `SUPABASE_SMTP_*` values in `.env` from the Go High Level SMTP
+credentials, then create a Supabase Management API access token at
+`https://supabase.com/dashboard/account/tokens` and set it as
+`SUPABASE_ACCESS_TOKEN`. `SUPABASE_PROJECT_REF` is optional when
+`NEXT_PUBLIC_SUPABASE_URL` points at the project.
+
+Preview the configuration without sending it:
+
+```bash
+npm run supabase:smtp:configure -- --dry-run
+```
+
+Apply the configuration:
+
+```bash
+npm run supabase:smtp:configure
+```
+
+The script enables custom SMTP, keeps email confirmation required, sets the
+Supabase Auth site URL from `SUPABASE_AUTH_SITE_URL` or `NEXT_PUBLIC_APP_URL`,
+uses the configured Go High Level SMTP credentials, and optionally updates
+`rate_limit_email_sent` from `SUPABASE_AUTH_EMAIL_RATE_LIMIT_PER_HOUR`.
 
 ## GHL Backend Setup
 
