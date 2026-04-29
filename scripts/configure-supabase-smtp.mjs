@@ -193,6 +193,8 @@ function buildAuthConfigPatch() {
   const senderName = readEnv("SUPABASE_SMTP_SENDER_NAME", "TDA FileShare");
   const templates = buildEmailTemplates(senderName);
 
+  const smtpMaxFrequency = readOptionalInt("SUPABASE_SMTP_MAX_FREQUENCY") ?? 5;
+
   const patch = {
     external_email_enabled: true,
     mailer_secure_email_change_enabled: true,
@@ -205,6 +207,7 @@ function buildAuthConfigPatch() {
     smtp_user: readEnv("SUPABASE_SMTP_USER"),
     smtp_pass: readEnv("SUPABASE_SMTP_PASS"),
     smtp_sender_name: senderName,
+    smtp_max_frequency: smtpMaxFrequency,
 
     mailer_subjects_confirmation: `Confirm your ${senderName} account`,
     mailer_subjects_recovery: `Reset your ${senderName} password`,
