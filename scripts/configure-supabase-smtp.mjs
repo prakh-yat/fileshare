@@ -18,6 +18,11 @@ function readEnv(name, fallback) {
   return value;
 }
 
+function readOptionalEnv(name) {
+  const value = process.env[name]?.trim();
+  return value || undefined;
+}
+
 function readOptionalInt(name) {
   const rawValue = process.env[name]?.trim();
 
@@ -48,16 +53,42 @@ function getProjectRef() {
   return projectRef;
 }
 
+function buildRedirectAllowList(siteUrl) {
+  const additional = readOptionalEnv("SUPABASE_AUTH_ADDITIONAL_REDIRECT_URLS");
+  const candidates = new Set();
+
+  // Always include the app's auth callback paths under the site URL.
+  candidates.add(`${siteUrl}/auth/confirm`);
+  candidates.add(`${siteUrl}/auth/callback`);
+  candidates.add(`${siteUrl}/dashboard`);
+  candidates.add(`${siteUrl}/**`);
+
+  if (additional) {
+    additional
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .forEach((value) => candidates.add(value.replace(/\/$/, "")));
+  }
+
+  return Array.from(candidates).join(",");
+}
+
 function buildAuthConfigPatch() {
   const smtpPort = readOptionalInt("SUPABASE_SMTP_PORT") ?? 587;
   const emailRateLimit = readOptionalInt("SUPABASE_AUTH_EMAIL_RATE_LIMIT_PER_HOUR");
-  const siteUrl = readEnv("SUPABASE_AUTH_SITE_URL", readEnv("NEXT_PUBLIC_APP_URL")).replace(/\/$/, "");
+  const siteUrl = readEnv("SUPABASE_AUTH_SITE_URL", readEnv("NEXT_PUBLIC_APP_URL")).replace(
+    /\/$/,
+    "",
+  );
+  const uriAllowList = buildRedirectAllowList(siteUrl);
 
   const patch = {
     external_email_enabled: true,
     mailer_secure_email_change_enabled: true,
     mailer_autoconfirm: false,
     site_url: siteUrl,
+    uri_allow_list: uriAllowList,
     smtp_admin_email: readEnv("SUPABASE_SMTP_ADMIN_EMAIL"),
     smtp_host: readEnv("SUPABASE_SMTP_HOST", "smtp.mailgun.org"),
     smtp_port: String(smtpPort),
@@ -80,12 +111,13 @@ function redact(value) {
 function printSafeSummary(projectRef, patch) {
   const summary = {
     projectRef,
+    site_url: patch.site_url,
+    uri_allow_list: patch.uri_allow_list.split(",").map((value) => value.trim()),
     smtp_admin_email: patch.smtp_admin_email,
     smtp_host: patch.smtp_host,
     smtp_port: patch.smtp_port,
     smtp_user: patch.smtp_user,
     smtp_sender_name: patch.smtp_sender_name,
-    site_url: patch.site_url,
     rate_limit_email_sent: patch.rate_limit_email_sent ?? "(Supabase default after custom SMTP)",
   };
 
@@ -97,7 +129,7 @@ async function main() {
   const patch = buildAuthConfigPatch();
 
   if (isDryRun) {
-    console.log("Dry run: Supabase Auth SMTP patch would use:");
+    console.log("Dry run: Supabase Auth + SMTP patch would use:");
     printSafeSummary(projectRef, patch);
     return;
   }
@@ -115,13 +147,13 @@ async function main() {
   if (!response.ok) {
     const body = await response.text();
     throw new Error(
-      `Supabase SMTP configuration failed with ${response.status} ${response.statusText}${
+      `Supabase Auth/SMTP configuration failed with ${response.status} ${response.statusText}${
         body ? `: ${redact(body)}` : ""
       }`,
     );
   }
 
-  console.log("Supabase Auth SMTP configured successfully:");
+  console.log("Supabase Auth + SMTP configured successfully:");
   printSafeSummary(projectRef, patch);
 }
 
