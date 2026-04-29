@@ -1,6 +1,5 @@
 "use client";
 
-import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import {
   AlertCircle,
   CheckCircle2,
@@ -30,7 +29,7 @@ import {
   X,
 } from "lucide-react";
 import Image from "next/image";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 type ViewMode = "grid" | "list";
 type ActiveScope = "mine" | "shared";
@@ -79,11 +78,24 @@ type Toast = {
   message: string;
 };
 
-type MediaDashboardProps = {
-  initialStorageReady: boolean;
+type CurrentUser = {
+  id: string;
+  email: string | null;
+  emailNormalized: string | null;
 };
 
-export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
+type MediaDashboardProps = {
+  initialStorageReady: boolean;
+  currentUser: CurrentUser;
+};
+
+type UploadProgress = {
+  total: number;
+  completed: number;
+  fileName: string;
+};
+
+export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashboardProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [activeScope, setActiveScope] = useState<ActiveScope>("mine");
   const [items, setItems] = useState<MediaItem[]>([]);
@@ -95,13 +107,22 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
   const [sortMode, setSortMode] = useState<SortMode>("updated-desc");
   const [searchQuery, setSearchQuery] = useState("");
   const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: null, name: "Files" }]);
-  const [loading, setLoading] = useState(false);
+  const [loadingInitial, setLoadingInitial] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
+  const [dragOver, setDragOver] = useState(false);
   const [dialog, setDialog] = useState<DialogState>(null);
   const [textValue, setTextValue] = useState("");
   const [destinationId, setDestinationId] = useState("");
   const [toast, setToast] = useState<Toast | null>(null);
+  const [, startTransition] = useTransition();
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+  const syncControllerRef = useRef<AbortController | null>(null);
+  const requestSequenceRef = useRef(0);
+  const dropCounterRef = useRef(0);
 
   const currentFolder = crumbs[crumbs.length - 1];
   const selectedItems = useMemo(
@@ -115,56 +136,154 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
   const canBulkShare =
     selectedItems.length > 0 && selectedShareableItems.length === selectedItems.length;
   const hasStorageReady = initialStorageReady;
+  const userInitials = useMemo(() => deriveInitials(currentUser.email), [currentUser.email]);
 
   const showToast = useCallback((message: string, type: Toast["type"] = "info") => {
     setToast({ message, type });
-    window.setTimeout(() => setToast(null), 4200);
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 4200);
   }, []);
 
-  const loadMedia = useCallback(async () => {
-    if (!hasStorageReady) return;
-
-    setLoading(true);
-    try {
-      const params = new URLSearchParams({
-        limit: "100",
-      });
+  const queryParamsFor = useCallback(
+    (override?: Partial<{ scope: ActiveScope; parentId: string | null; filter: FilterMode; sort: SortMode }>) => {
+      const params = new URLSearchParams({ limit: "200" });
+      const scope = override?.scope ?? activeScope;
+      const parentId = override?.parentId ?? currentFolder.id;
+      const filter = override?.filter ?? filterMode;
+      const sort = override?.sort ?? sortMode;
 
       const [sortBy, sortOrder] =
-        sortMode === "updated-desc"
+        sort === "updated-desc"
           ? ["updatedAt", "desc"]
-          : sortMode === "updated-asc"
+          : sort === "updated-asc"
             ? ["updatedAt", "asc"]
-            : sortMode === "name-desc"
+            : sort === "name-desc"
               ? ["name", "desc"]
               : ["name", "asc"];
 
+      params.set("scope", scope);
       params.set("sortBy", sortBy);
       params.set("sortOrder", sortOrder);
-      if (filterMode !== "all") params.set("type", filterMode);
-      params.set("scope", activeScope);
-      if (currentFolder.id) params.set("parentId", currentFolder.id);
+      if (filter !== "all") params.set("type", filter);
+      if (parentId) params.set("parentId", parentId);
+      return params;
+    },
+    [activeScope, currentFolder.id, filterMode, sortMode],
+  );
 
+  const fetchList = useCallback(
+    async (sequence: number) => {
+      const params = queryParamsFor();
       const payload = await requestJson<{ items?: MediaItem[] }>(
         `/api/media/files?${params.toString()}`,
       );
-      const normalized = payload.items ?? normalizeMediaPayload(payload);
-      setItems(normalized);
-      setKnownFolders((previous) => mergeFolders(previous, normalized));
+      if (sequence !== requestSequenceRef.current) return null;
+      const next = payload.items ?? [];
+      setItems(next);
+      setKnownFolders((previous) => mergeFolders(previous, next));
       setSelectedIds(new Set());
-    } catch (error) {
-      showToast(errorMessage(error), "error");
-    } finally {
-      setLoading(false);
-    }
-  }, [activeScope, currentFolder.id, filterMode, hasStorageReady, showToast, sortMode]);
+      return next;
+    },
+    [queryParamsFor],
+  );
+
+  const triggerSync = useCallback(
+    (sequence: number) => {
+      if (!hasStorageReady) return;
+      if (activeScope !== "mine") return;
+
+      syncControllerRef.current?.abort();
+      const controller = new AbortController();
+      syncControllerRef.current = controller;
+
+      const params = queryParamsFor();
+      setRefreshing(true);
+
+      fetch(`/api/media/sync?${params.toString()}`, {
+        method: "POST",
+        signal: controller.signal,
+        credentials: "include",
+      })
+        .then(async (response) => {
+          if (sequence !== requestSequenceRef.current) return;
+          if (!response.ok) return;
+          const payload = (await response.json()) as { items?: MediaItem[] };
+          if (Array.isArray(payload.items)) {
+            startTransition(() => {
+              setItems(payload.items as MediaItem[]);
+              setKnownFolders((previous) => mergeFolders(previous, payload.items ?? []));
+            });
+          }
+        })
+        .catch(() => {
+          /* aborts and network errors are non-fatal */
+        })
+        .finally(() => {
+          if (syncControllerRef.current === controller) {
+            setRefreshing(false);
+            syncControllerRef.current = null;
+          }
+        });
+    },
+    [activeScope, hasStorageReady, queryParamsFor],
+  );
+
+  const loadMedia = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (!hasStorageReady) return;
+
+      const sequence = ++requestSequenceRef.current;
+      if (!options?.silent) setLoadingInitial(true);
+
+      try {
+        await fetchList(sequence);
+        triggerSync(sequence);
+      } catch (error) {
+        if (sequence === requestSequenceRef.current) {
+          showToast(errorMessage(error), "error");
+        }
+      } finally {
+        if (sequence === requestSequenceRef.current && !options?.silent) {
+          setLoadingInitial(false);
+        }
+      }
+    },
+    [fetchList, hasStorageReady, showToast, triggerSync],
+  );
 
   useEffect(() => {
-    if (hasStorageReady) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      void loadMedia();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadMedia();
+  }, [loadMedia]);
+
+  useEffect(() => {
+    if (!activeMenuId) return;
+
+    function handleClick(event: MouseEvent) {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-menu-host='true']")) return;
+      setActiveMenuId(null);
     }
-  }, [hasStorageReady, loadMedia]);
+    function handleKey(event: KeyboardEvent) {
+      if (event.key === "Escape") setActiveMenuId(null);
+    }
+
+    window.addEventListener("mousedown", handleClick);
+    window.addEventListener("keydown", handleKey);
+    return () => {
+      window.removeEventListener("mousedown", handleClick);
+      window.removeEventListener("keydown", handleKey);
+    };
+  }, [activeMenuId]);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+      syncControllerRef.current?.abort();
+    };
+  }, []);
 
   const visibleItems = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -173,35 +292,70 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
   }, [items, searchQuery]);
 
   async function handleLogout() {
-    const supabase = createSupabaseBrowserClient();
-    await supabase.auth.signOut();
+    try {
+      await fetch("/api/auth/signout", { method: "POST", credentials: "include" });
+    } catch {
+      // ignore network failures, still navigate to login
+    }
     window.location.href = "/login";
   }
 
   async function uploadFiles(fileList: FileList | null) {
     if (!fileList?.length || activeScope !== "mine") return;
 
+    const files = Array.from(fileList);
+    setUploadProgress({ total: files.length, completed: 0, fileName: files[0].name });
     setBusy(true);
-    try {
-      for (const file of Array.from(fileList)) {
-        const formData = new FormData();
-        formData.set("file", file);
-        formData.set("name", file.name);
-        formData.set("hosted", "false");
-        if (currentFolder.id) formData.set("parentId", currentFolder.id);
 
-        await requestJson<unknown>("/api/media/upload", {
-          method: "POST",
-          body: formData,
-        });
+    let successes = 0;
+    const newItems: MediaItem[] = [];
+
+    try {
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        setUploadProgress({ total: files.length, completed: index, fileName: file.name });
+
+        try {
+          const formData = new FormData();
+          formData.set("file", file);
+          formData.set("name", file.name);
+          formData.set("hosted", "false");
+          if (currentFolder.id) formData.set("parentId", currentFolder.id);
+
+          const response = await requestJson<{ item: MediaItem }>("/api/media/upload", {
+            method: "POST",
+            body: formData,
+          });
+          if (response.item) {
+            newItems.push(response.item);
+          }
+          successes += 1;
+        } catch (error) {
+          showToast(`${file.name}: ${errorMessage(error)}`, "error");
+        }
       }
 
-      showToast(`${fileList.length} file${fileList.length === 1 ? "" : "s"} uploaded.`, "success");
-      await loadMedia();
-    } catch (error) {
-      showToast(errorMessage(error), "error");
+      if (newItems.length) {
+        setItems((previous) => [...newItems, ...previous]);
+        setKnownFolders((previous) => mergeFolders(previous, newItems));
+      }
+
+      if (successes === files.length) {
+        showToast(
+          `${successes} file${successes === 1 ? "" : "s"} uploaded.`,
+          "success",
+        );
+      } else if (successes > 0) {
+        showToast(
+          `${successes} of ${files.length} files uploaded.`,
+          "info",
+        );
+      }
+
+      void loadMedia({ silent: true });
     } finally {
       setBusy(false);
+      setUploadProgress(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
@@ -211,14 +365,18 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
     if (!name || activeScope !== "mine") return;
 
     await runMutation(async () => {
-      await requestJson<unknown>("/api/media/folder", {
+      const response = await requestJson<{ item: MediaItem }>("/api/media/folder", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, parentId: currentFolder.id }),
       });
       setDialog(null);
       showToast("Folder created.", "success");
-      await loadMedia();
+
+      if (response.item) {
+        setItems((previous) => [response.item, ...previous]);
+        setKnownFolders((previous) => mergeFolders(previous, [response.item]));
+      }
     });
   }
 
@@ -227,14 +385,23 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
     if (!name || !item.canRename) return;
 
     await runMutation(async () => {
-      await requestJson<unknown>(`/api/media/${encodeURIComponent(item.id)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
-      });
+      const response = await requestJson<{ item: MediaItem }>(
+        `/api/media/${encodeURIComponent(item.id)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        },
+      );
       setDialog(null);
       showToast("Renamed.", "success");
-      await loadMedia();
+
+      if (response.item) {
+        setItems((previous) => previous.map((entry) => (entry.id === item.id ? response.item : entry)));
+        setKnownFolders((previous) =>
+          previous.map((entry) => (entry.id === item.id ? response.item : entry)),
+        );
+      }
     });
   }
 
@@ -268,7 +435,11 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
 
       setDialog(null);
       showToast("Moved.", "success");
-      await loadMedia();
+
+      const removedIds = new Set(targets.map((target) => target.id));
+      setItems((previous) => previous.filter((entry) => !removedIds.has(entry.id)));
+      setSelectedIds(new Set());
+      void loadMedia({ silent: true });
     });
   }
 
@@ -310,9 +481,11 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
         }),
       });
       setDialog(null);
+      const removedIds = new Set(itemsToDelete.map((item) => item.id));
+      setItems((previous) => previous.filter((entry) => !removedIds.has(entry.id)));
+      setKnownFolders((previous) => previous.filter((entry) => !removedIds.has(entry.id)));
       setSelectedIds(new Set());
       showToast(status === "trashed" ? "Moved to trash." : "Deleted.", "success");
-      await loadMedia();
     });
   }
 
@@ -330,9 +503,16 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
 
   async function shareItems(targets: MediaItem[]) {
     const email = textValue.trim();
-    if (!email || !targets.length) return;
+    if (!email) {
+      showToast("Enter an email address.", "error");
+      return;
+    }
+    if (!targets.length) return;
     if (targets.some((target) => !target.canShare)) {
-      showToast("Only the owner can share selected files or folders.", "error");
+      showToast(
+        "Only the owner can share these files. Items shared with you cannot be re-shared.",
+        "error",
+      );
       return;
     }
 
@@ -358,8 +538,12 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
       showToast("This item does not expose a public URL.", "error");
       return;
     }
-    await navigator.clipboard.writeText(item.url);
-    showToast("Link copied.", "success");
+    try {
+      await navigator.clipboard.writeText(item.url);
+      showToast("Link copied to clipboard.", "success");
+    } catch {
+      showToast("Could not copy to clipboard.", "error");
+    }
   }
 
   function openFolder(item: MediaItem) {
@@ -382,6 +566,15 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
     });
   }
 
+  function selectAllVisible() {
+    if (!visibleItems.length) return;
+    if (selectedIds.size === visibleItems.length) {
+      setSelectedIds(new Set());
+      return;
+    }
+    setSelectedIds(new Set(visibleItems.map((item) => item.id)));
+  }
+
   function openFolderDialog() {
     setTextValue("");
     setDialog({ kind: "folder" });
@@ -400,14 +593,20 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
   }
 
   function openShareDialog(item: MediaItem) {
-    if (!item.canShare) return;
+    if (!item.canShare) {
+      showToast("Only the owner of this item can share it.", "error");
+      return;
+    }
     setTextValue("");
     setDialog({ kind: "share", items: [item] });
   }
 
   function openBulkShareDialog() {
     if (!canBulkShare) {
-      showToast("Only the owner can share selected files or folders.", "error");
+      showToast(
+        "Only the owner of the selected items can share them.",
+        "error",
+      );
       return;
     }
     setTextValue("");
@@ -419,11 +618,44 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
     setItems([]);
     setSelectedIds(new Set());
     setActiveMenuId(null);
+    setSearchQuery("");
     setCrumbs([{ id: null, name: scope === "mine" ? "Files" : "Shared with me" }]);
   }
 
+  function handleDragEnter(event: React.DragEvent<HTMLDivElement>) {
+    if (!hasStorageReady || activeScope !== "mine") return;
+    if (!event.dataTransfer.types.includes("Files")) return;
+    event.preventDefault();
+    dropCounterRef.current += 1;
+    setDragOver(true);
+  }
+  function handleDragLeave(event: React.DragEvent<HTMLDivElement>) {
+    if (!dragOver) return;
+    event.preventDefault();
+    dropCounterRef.current = Math.max(0, dropCounterRef.current - 1);
+    if (dropCounterRef.current === 0) setDragOver(false);
+  }
+  function handleDragOver(event: React.DragEvent<HTMLDivElement>) {
+    if (!hasStorageReady || activeScope !== "mine") return;
+    if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+  }
+  function handleDrop(event: React.DragEvent<HTMLDivElement>) {
+    if (!hasStorageReady || activeScope !== "mine") return;
+    if (!event.dataTransfer.files?.length) return;
+    event.preventDefault();
+    dropCounterRef.current = 0;
+    setDragOver(false);
+    void uploadFiles(event.dataTransfer.files);
+  }
+
   return (
-    <div className="flex min-h-screen bg-[#f6f7f9] text-slate-950">
+    <div
+      className="relative flex min-h-screen bg-[#f6f7f9] text-slate-950"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <aside
         className={`sticky top-0 relative flex h-screen shrink-0 flex-col bg-[#263244] text-slate-200 transition-[width] duration-200 ${
           collapsed ? "w-[76px]" : "w-[248px]"
@@ -457,8 +689,8 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
             }`}
           >
             <LayoutDashboard className="h-5 w-5 shrink-0" aria-hidden="true" />
-            <span className={collapsed ? "sr-only" : ""}>Dashboard</span>
-            {collapsed ? <Tooltip label="Dashboard" /> : null}
+            <span className={collapsed ? "sr-only" : ""}>My files</span>
+            {collapsed ? <Tooltip label="My files" /> : null}
           </button>
           <button
             type="button"
@@ -476,6 +708,16 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
         </nav>
 
         <div className="space-y-2 border-t border-white/10 p-3">
+          {!collapsed ? (
+            <div className="rounded-[8px] bg-white/5 px-3 py-2 text-xs text-white/70">
+              <div className="flex items-center gap-2">
+                <span className="grid h-7 w-7 place-items-center rounded-full bg-blue-600 text-[11px] font-semibold uppercase text-white">
+                  {userInitials}
+                </span>
+                <span className="truncate text-white/90">{currentUser.email ?? "Signed in"}</span>
+              </div>
+            </div>
+          ) : null}
           <button
             type="button"
             onClick={handleLogout}
@@ -500,7 +742,7 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
       <main className="min-w-0 flex-1">
         <section className="px-6 py-5">
           <div className="mb-4 flex items-center gap-2 overflow-x-auto pb-1">
-            <div className="flex h-11 min-w-[280px] flex-[1_1_420px] items-center gap-3 rounded-[8px] border border-slate-300 bg-white px-3 focus-within:border-blue-600 focus-within:ring-4 focus-within:ring-blue-100">
+            <div className="flex h-11 min-w-[280px] flex-[1_1_420px] items-center gap-3 rounded-[10px] border border-slate-300 bg-white px-3 transition focus-within:border-blue-600 focus-within:ring-4 focus-within:ring-blue-100">
               <Search className="h-4 w-4 text-slate-400" aria-hidden="true" />
               <input
                 value={searchQuery}
@@ -508,12 +750,22 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
                 placeholder="Search media or folders"
                 className="h-11 min-w-0 flex-1 border-0 bg-transparent text-sm outline-none placeholder:text-slate-400"
               />
+              {searchQuery ? (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="grid h-6 w-6 place-items-center rounded-[6px] text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                  aria-label="Clear search"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              ) : null}
             </div>
 
             <select
               value={sortMode}
               onChange={(event) => setSortMode(event.target.value as SortMode)}
-              className="h-11 shrink-0 rounded-[8px] border border-slate-300 bg-white px-3 text-sm text-slate-700 outline-none transition focus:border-blue-600 focus:ring-4 focus:ring-blue-100"
+              className="h-11 shrink-0 rounded-[10px] border border-slate-300 bg-white px-3 text-sm text-slate-700 outline-none transition focus:border-blue-600 focus:ring-4 focus:ring-blue-100"
             >
               <option value="updated-desc">Modified: Newest first</option>
               <option value="updated-asc">Modified: Oldest first</option>
@@ -523,7 +775,7 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
             <select
               value={filterMode}
               onChange={(event) => setFilterMode(event.target.value as FilterMode)}
-              className="h-11 shrink-0 rounded-[8px] border border-slate-300 bg-white px-3 text-sm text-slate-700 outline-none transition focus:border-blue-600 focus:ring-4 focus:ring-blue-100"
+              className="h-11 shrink-0 rounded-[10px] border border-slate-300 bg-white px-3 text-sm text-slate-700 outline-none transition focus:border-blue-600 focus:ring-4 focus:ring-blue-100"
             >
               <option value="all">All</option>
               <option value="folder">Folders</option>
@@ -545,7 +797,7 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={!hasStorageReady || activeScope !== "mine" || busy}
-              className="inline-flex h-11 shrink-0 items-center gap-2 rounded-[8px] bg-blue-600 px-4 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+              className="inline-flex h-11 shrink-0 items-center gap-2 rounded-[10px] bg-blue-600 px-4 text-sm font-semibold text-white transition hover:bg-blue-700 active:bg-blue-800 disabled:cursor-not-allowed disabled:bg-blue-300"
             >
               <UploadCloud className="h-4 w-4" aria-hidden="true" />
               Upload
@@ -561,7 +813,7 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
               type="button"
               onClick={openFolderDialog}
               disabled={!hasStorageReady || activeScope !== "mine" || busy}
-              className="inline-flex h-11 shrink-0 items-center gap-2 rounded-[8px] border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-11 shrink-0 items-center gap-2 rounded-[10px] border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <FolderPlus className="h-4 w-4" aria-hidden="true" />
               New folder
@@ -569,10 +821,14 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
             <button
               type="button"
               onClick={() => void loadMedia()}
-              disabled={!hasStorageReady || loading}
-              className="inline-flex h-11 shrink-0 items-center gap-2 rounded-[8px] border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!hasStorageReady || loadingInitial}
+              className="inline-flex h-11 shrink-0 items-center gap-2 rounded-[10px] border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              title={refreshing ? "Syncing with media storage" : "Refresh"}
             >
-              <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} aria-hidden="true" />
+              <RefreshCw
+                className={`h-4 w-4 ${loadingInitial || refreshing ? "animate-spin" : ""}`}
+                aria-hidden="true"
+              />
               Refresh
             </button>
           </div>
@@ -594,48 +850,48 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
             </div>
           ) : null}
 
-            {selectedItems.length ? (
-              <div className="mb-4 flex flex-wrap items-center gap-2 rounded-[8px] border border-blue-200 bg-blue-50 px-2 py-2">
-                <span className="px-2 text-sm font-medium text-blue-800">
-                  {selectedItems.length} selected
-                </span>
-                <button
-                  type="button"
-                  onClick={() => openMoveDialog()}
-                  disabled={!canBulkManage}
-                  className="inline-flex h-8 items-center gap-1 rounded-[6px] bg-white px-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50"
-                >
-                  <Move className="h-4 w-4" aria-hidden="true" />
-                  Move
-                </button>
-                <button
-                  type="button"
-                  onClick={openBulkShareDialog}
-                  disabled={!canBulkShare}
-                  className="inline-flex h-8 items-center gap-1 rounded-[6px] bg-white px-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <Share2 className="h-4 w-4" aria-hidden="true" />
-                  Share
-                </button>
-                <button
-                  type="button"
-                  onClick={() => openBulkDeleteDialog("trashed")}
-                  disabled={!canBulkManage}
-                  className="inline-flex h-8 items-center gap-1 rounded-[6px] bg-white px-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50"
-                >
-                  <Trash2 className="h-4 w-4" aria-hidden="true" />
-                  Trash
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSelectedIds(new Set())}
-                  className="grid h-8 w-8 place-items-center rounded-[6px] bg-white text-slate-500 shadow-sm transition hover:bg-slate-50 hover:text-slate-900"
-                  aria-label="Clear selection"
-                >
-                  <X className="h-4 w-4" aria-hidden="true" />
-                </button>
-              </div>
-            ) : null}
+          {selectedItems.length ? (
+            <div className="mb-4 flex flex-wrap items-center gap-2 rounded-[10px] border border-blue-200 bg-blue-50 px-2 py-2">
+              <span className="px-2 text-sm font-medium text-blue-800">
+                {selectedItems.length} selected
+              </span>
+              <button
+                type="button"
+                onClick={() => openMoveDialog()}
+                disabled={!canBulkManage}
+                className="inline-flex h-8 items-center gap-1 rounded-[6px] bg-white px-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Move className="h-4 w-4" aria-hidden="true" />
+                Move
+              </button>
+              <button
+                type="button"
+                onClick={openBulkShareDialog}
+                disabled={!canBulkShare}
+                className="inline-flex h-8 items-center gap-1 rounded-[6px] bg-white px-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Share2 className="h-4 w-4" aria-hidden="true" />
+                Share
+              </button>
+              <button
+                type="button"
+                onClick={() => openBulkDeleteDialog("trashed")}
+                disabled={!canBulkManage}
+                className="inline-flex h-8 items-center gap-1 rounded-[6px] bg-white px-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Trash2 className="h-4 w-4" aria-hidden="true" />
+                Trash
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedIds(new Set())}
+                className="grid h-8 w-8 place-items-center rounded-[6px] bg-white text-slate-500 shadow-sm transition hover:bg-slate-50 hover:text-slate-900"
+                aria-label="Clear selection"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+          ) : null}
 
           {!hasStorageReady ? (
             <SetupPanel
@@ -644,13 +900,12 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
             />
           ) : (
             <div className="min-h-[520px]">
-              {loading ? (
-                <div className="grid h-[420px] place-items-center rounded-[8px] border border-slate-200 bg-white">
-                  <div className="flex items-center gap-3 text-sm font-medium text-slate-600">
-                    <Loader2 className="h-5 w-5 animate-spin text-blue-600" aria-hidden="true" />
-                    Loading media
-                  </div>
-                </div>
+              {loadingInitial ? (
+                viewMode === "grid" ? (
+                  <SkeletonGrid />
+                ) : (
+                  <SkeletonList />
+                )
               ) : visibleItems.length ? (
                 viewMode === "grid" ? (
                   <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4">
@@ -675,7 +930,38 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
                     ))}
                   </div>
                 ) : (
-                  <div className="overflow-visible rounded-[8px] border border-slate-200 bg-white">
+                  <div className="overflow-visible rounded-[10px] border border-slate-200 bg-white">
+                    <div className="grid grid-cols-[44px_1fr_130px_180px_150px_48px] items-center gap-3 border-b border-slate-100 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      <button
+                        type="button"
+                        onClick={selectAllVisible}
+                        className="grid h-7 w-7 place-items-center rounded-[6px] text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                        title={
+                          selectedIds.size === visibleItems.length
+                            ? "Clear selection"
+                            : "Select all"
+                        }
+                      >
+                        <input
+                          type="checkbox"
+                          aria-label="Select all"
+                          checked={selectedIds.size > 0 && selectedIds.size === visibleItems.length}
+                          ref={(node) => {
+                            if (node) {
+                              node.indeterminate =
+                                selectedIds.size > 0 && selectedIds.size < visibleItems.length;
+                            }
+                          }}
+                          onChange={selectAllVisible}
+                          className="h-4 w-4"
+                        />
+                      </button>
+                      <span>Name</span>
+                      <span>Size</span>
+                      <span>Owner</span>
+                      <span>Modified</span>
+                      <span className="sr-only">Actions</span>
+                    </div>
                     {visibleItems.map((item) => (
                       <MediaRow
                         key={item.id}
@@ -699,6 +985,7 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
                 )
               ) : (
                 <EmptyMedia
+                  searching={Boolean(searchQuery.trim())}
                   onUpload={() => fileInputRef.current?.click()}
                   onCreateFolder={openFolderDialog}
                   canCreate={activeScope === "mine"}
@@ -712,11 +999,15 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
       {dialog ? (
         <Dialog onClose={() => setDialog(null)}>
           {dialog.kind === "preview" ? (
-            <PreviewDialog item={dialog.item} onClose={() => setDialog(null)} onCopy={() => void copyLink(dialog.item)} />
+            <PreviewDialog
+              item={dialog.item}
+              onClose={() => setDialog(null)}
+              onCopy={() => void copyLink(dialog.item)}
+            />
           ) : dialog.kind === "move" ? (
             <FormDialog
               title={dialog.item ? `Move ${dialog.item.name}` : `Move ${selectedItems.length} items`}
-              description="Choose a destination folder. Use root to move the item out of its current folder."
+              description="Choose a destination folder. Use Files (root) to move it out of its current folder."
               primaryLabel="Move"
               onPrimary={() => void moveSelection(dialog.item)}
               onClose={() => setDialog(null)}
@@ -728,7 +1019,7 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
                 id="destination"
                 value={destinationId}
                 onChange={(event) => setDestinationId(event.target.value)}
-                className="mt-2 h-11 w-full rounded-[8px] border border-slate-300 bg-white px-3 text-sm outline-none focus:border-blue-600 focus:ring-4 focus:ring-blue-100"
+                className="mt-2 h-11 w-full rounded-[10px] border border-slate-300 bg-white px-3 text-sm outline-none focus:border-blue-600 focus:ring-4 focus:ring-blue-100"
               >
                 <option value="">Files</option>
                 {knownFolders
@@ -757,12 +1048,12 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
                   ? `Share ${dialog.items[0].name}`
                   : `Share ${dialog.items.length} items`
               }
-              description="Enter the email address that should get access to the selected files or folders."
+              description="Enter the email address that should get access to the selected files or folders. They will be able to view and download but not re-share."
               primaryLabel="Share"
               onPrimary={() => void shareItems(dialog.items)}
               onClose={() => setDialog(null)}
             >
-              <NameField value={textValue} onChange={setTextValue} label="Email address" />
+              <NameField value={textValue} onChange={setTextValue} label="Email address" placeholder="recipient@example.com" />
             </FormDialog>
           ) : dialog.kind === "delete" ? (
             <ConfirmDeleteDialog
@@ -779,15 +1070,45 @@ export function MediaDashboard({ initialStorageReady }: MediaDashboardProps) {
               onPrimary={() => void createFolder()}
               onClose={() => setDialog(null)}
             >
-              <NameField value={textValue} onChange={setTextValue} label="Folder name" />
+              <NameField value={textValue} onChange={setTextValue} label="Folder name" placeholder="My folder" />
             </FormDialog>
           )}
         </Dialog>
       ) : null}
 
+      {dragOver && hasStorageReady && activeScope === "mine" ? (
+        <div className="pointer-events-none fixed inset-0 z-30 grid place-items-center bg-blue-600/10 backdrop-blur-sm">
+          <div className="rounded-[12px] border-2 border-dashed border-blue-500 bg-white px-8 py-6 text-center shadow-xl">
+            <UploadCloud className="mx-auto h-10 w-10 text-blue-600" aria-hidden="true" />
+            <p className="mt-3 text-sm font-semibold text-slate-900">Drop to upload</p>
+            <p className="text-xs text-slate-500">Files will be added to {currentFolder.name}</p>
+          </div>
+        </div>
+      ) : null}
+
       {toast ? <ToastView toast={toast} /> : null}
-      {busy ? (
-        <div className="fixed bottom-5 right-5 flex items-center gap-2 rounded-[8px] bg-slate-950 px-4 py-3 text-sm font-medium text-white shadow-lg">
+      {uploadProgress ? (
+        <div className="fixed bottom-5 right-5 z-40 w-[320px] overflow-hidden rounded-[10px] bg-slate-950 text-sm text-white shadow-xl">
+          <div className="flex items-center gap-3 px-4 py-3">
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+            <div className="min-w-0 flex-1">
+              <p className="truncate font-medium">{uploadProgress.fileName}</p>
+              <p className="text-xs text-white/60">
+                Uploading {uploadProgress.completed + 1} of {uploadProgress.total}
+              </p>
+            </div>
+          </div>
+          <div className="h-1 w-full bg-white/10">
+            <div
+              className="h-full bg-blue-500 transition-[width] duration-300"
+              style={{
+                width: `${Math.round(((uploadProgress.completed) / uploadProgress.total) * 100)}%`,
+              }}
+            />
+          </div>
+        </div>
+      ) : busy ? (
+        <div className="fixed bottom-5 right-5 z-40 flex items-center gap-2 rounded-[10px] bg-slate-950 px-4 py-3 text-sm font-medium text-white shadow-lg">
           <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
           Working
         </div>
@@ -820,7 +1141,7 @@ function SegmentedButton({
       type="button"
       onClick={onClick}
       title={label}
-      className={`grid h-11 w-11 place-items-center rounded-[8px] border text-slate-600 transition ${
+      className={`grid h-11 w-11 shrink-0 place-items-center rounded-[10px] border text-slate-600 transition ${
         active
           ? "border-blue-200 bg-blue-50 text-blue-700"
           : "border-slate-300 bg-white hover:bg-slate-50"
@@ -837,11 +1158,14 @@ function MediaCard(props: MediaEntryProps) {
   const preview = item.thumbnailUrl || item.url;
 
   return (
-    <article className="group relative overflow-visible rounded-[8px] border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
+    <article
+      data-menu-host="true"
+      className="group relative overflow-visible rounded-[10px] border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
+    >
       <button
         type="button"
         onClick={item.type === "folder" ? onOpen : props.onPreview}
-        className="block aspect-[1.42] w-full bg-slate-100 text-left"
+        className="block aspect-[1.42] w-full overflow-hidden rounded-t-[10px] bg-slate-100 text-left"
       >
         {item.type === "folder" ? (
           <div className="flex h-full items-center justify-center bg-slate-100">
@@ -849,8 +1173,10 @@ function MediaCard(props: MediaEntryProps) {
           </div>
         ) : preview && isImageItem(item) ? (
           <div
-            className="h-full w-full bg-cover bg-center"
-            style={{ backgroundImage: `linear-gradient(to bottom, transparent 45%, rgba(15, 23, 42, 0.7)), url("${preview}")` }}
+            className="h-full w-full bg-cover bg-center transition-transform duration-300 group-hover:scale-[1.02]"
+            style={{
+              backgroundImage: `linear-gradient(to bottom, transparent 45%, rgba(15, 23, 42, 0.7)), url("${preview}")`,
+            }}
           />
         ) : (
           <div className="flex h-full items-center justify-center bg-slate-100">
@@ -869,13 +1195,13 @@ function MediaCard(props: MediaEntryProps) {
         />
       </div>
 
-      <div className="absolute right-2 top-2 flex gap-1 opacity-0 transition group-hover:opacity-100">
+      <div className="absolute right-2 top-2 flex gap-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
         {item.url ? (
           <button
             type="button"
             onClick={() => window.open(item.url, "_blank", "noopener,noreferrer")}
-            className="grid h-8 w-8 place-items-center rounded-[6px] bg-white text-slate-700 shadow-sm"
-            title="Download"
+            className="grid h-8 w-8 place-items-center rounded-[6px] bg-white text-slate-700 shadow-sm transition hover:bg-slate-50"
+            title="Open in new tab"
           >
             <Download className="h-4 w-4" aria-hidden="true" />
           </button>
@@ -883,14 +1209,14 @@ function MediaCard(props: MediaEntryProps) {
         <button
           type="button"
           onClick={onMenu}
-          className="grid h-8 w-8 place-items-center rounded-[6px] bg-white text-slate-700 shadow-sm"
+          className="grid h-8 w-8 place-items-center rounded-[6px] bg-white text-slate-700 shadow-sm transition hover:bg-slate-50"
           title="More actions"
         >
           <MoreVertical className="h-4 w-4" aria-hidden="true" />
         </button>
       </div>
 
-      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-950/80 to-transparent p-3 text-white">
+      <div className="absolute inset-x-0 bottom-0 rounded-b-[10px] bg-gradient-to-t from-slate-950/85 via-slate-950/40 to-transparent p-3 text-white">
         <p className="truncate text-sm font-semibold">{item.name}</p>
         <p className="mt-1 text-xs text-white/75">
           {item.sharedWithMe
@@ -910,7 +1236,10 @@ function MediaRow(props: MediaEntryProps) {
   const { item, selected, onSelect, onOpen, activeMenu, onMenu } = props;
 
   return (
-    <div className="relative grid grid-cols-[44px_1fr_130px_180px_150px_48px] items-center gap-3 border-b border-slate-100 px-4 py-3 last:border-b-0">
+    <div
+      data-menu-host="true"
+      className="relative grid grid-cols-[44px_1fr_130px_180px_150px_48px] items-center gap-3 border-b border-slate-100 px-4 py-3 last:border-b-0 hover:bg-slate-50"
+    >
       <input
         type="checkbox"
         checked={selected}
@@ -937,9 +1266,11 @@ function MediaRow(props: MediaEntryProps) {
           <span className="block text-xs text-slate-500">{item.mimeType || item.type}</span>
         </span>
       </button>
-      <span className="text-sm text-slate-500">{item.type === "folder" ? "Folder" : formatBytes(item.size)}</span>
+      <span className="text-sm text-slate-500">
+        {item.type === "folder" ? "Folder" : formatBytes(item.size)}
+      </span>
       <span className="truncate text-sm text-slate-500">
-        {item.sharedWithMe ? item.ownerName || "Unknown owner" : "Owner"}
+        {item.sharedWithMe ? item.ownerName || "Unknown owner" : "You"}
       </span>
       <span className="text-sm text-slate-500">{formatDate(item.updatedAt || item.createdAt)}</span>
       <button
@@ -980,11 +1311,16 @@ function EntryMenu({
   onDelete,
 }: MediaEntryProps) {
   return (
-    <div className="absolute right-3 top-12 z-[80] w-48 overflow-hidden rounded-[8px] border border-slate-200 bg-white py-1 text-sm text-slate-700 shadow-xl">
+    <div
+      className="absolute right-3 top-12 z-[80] w-48 overflow-hidden rounded-[10px] border border-slate-200 bg-white py-1 text-sm text-slate-700 shadow-xl"
+      data-menu-host="true"
+    >
       {item.type === "file" ? (
         <MenuAction icon={<Eye className="h-4 w-4" />} label="Preview" onClick={onPreview} />
       ) : null}
-      <MenuAction icon={<Link2 className="h-4 w-4" />} label="Get link" onClick={onCopy} />
+      {item.url ? (
+        <MenuAction icon={<Link2 className="h-4 w-4" />} label="Copy link" onClick={onCopy} />
+      ) : null}
       {item.canShare ? (
         <MenuAction icon={<Share2 className="h-4 w-4" />} label="Share" onClick={onShare} />
       ) : null}
@@ -1004,6 +1340,9 @@ function EntryMenu({
             danger
           />
         </>
+      ) : null}
+      {!item.canShare && !item.canRename && !item.canMove && !item.canDelete && !item.url && item.type !== "file" ? (
+        <p className="px-3 py-2 text-xs text-slate-500">No actions available.</p>
       ) : null}
     </div>
   );
@@ -1042,9 +1381,9 @@ function SetupPanel({
   description: string;
 }) {
   return (
-    <div className="grid min-h-[420px] place-items-center rounded-[8px] border border-slate-200 bg-white px-6 text-center">
+    <div className="grid min-h-[420px] place-items-center rounded-[10px] border border-slate-200 bg-white px-6 text-center">
       <div className="max-w-md">
-        <div className="mx-auto grid h-14 w-14 place-items-center rounded-[8px] bg-blue-50 text-blue-700">
+        <div className="mx-auto grid h-14 w-14 place-items-center rounded-[10px] bg-blue-50 text-blue-700">
           <Folder className="h-7 w-7" aria-hidden="true" />
         </div>
         <h2 className="mt-5 text-2xl font-semibold tracking-normal text-slate-950">{title}</h2>
@@ -1058,42 +1397,86 @@ function EmptyMedia({
   onUpload,
   onCreateFolder,
   canCreate,
+  searching,
 }: {
   onUpload: () => void;
   onCreateFolder: () => void;
   canCreate: boolean;
+  searching: boolean;
 }) {
   return (
-    <div className="grid min-h-[420px] place-items-center rounded-[8px] border border-dashed border-slate-300 bg-white px-6 text-center">
+    <div className="grid min-h-[420px] place-items-center rounded-[10px] border border-dashed border-slate-300 bg-white px-6 text-center">
       <div className="max-w-sm">
-        <div className="mx-auto grid h-14 w-14 place-items-center rounded-[8px] bg-slate-100 text-slate-500">
+        <div className="mx-auto grid h-14 w-14 place-items-center rounded-[10px] bg-slate-100 text-slate-500">
           <UploadCloud className="h-7 w-7" aria-hidden="true" />
         </div>
-        <h2 className="mt-5 text-xl font-semibold text-slate-950">No media here</h2>
+        <h2 className="mt-5 text-xl font-semibold text-slate-950">
+          {searching ? "Nothing matches your search" : "No media here"}
+        </h2>
         <p className="mt-2 text-sm leading-6 text-slate-600">
-          {canCreate
-            ? "Upload files or create a folder in this location."
-            : "Files and folders shared with you will appear here."}
+          {searching
+            ? "Try a different keyword or clear the search."
+            : canCreate
+              ? "Drag files here, upload, or create a folder to get started."
+              : "Files and folders shared with you will appear here."}
         </p>
-        {canCreate ? (
+        {!searching && canCreate ? (
           <div className="mt-5 flex justify-center gap-2">
             <button
               type="button"
               onClick={onUpload}
-              className="h-10 rounded-[8px] bg-blue-600 px-4 text-sm font-semibold text-white transition hover:bg-blue-700"
+              className="h-10 rounded-[10px] bg-blue-600 px-4 text-sm font-semibold text-white transition hover:bg-blue-700"
             >
               Upload
             </button>
             <button
               type="button"
               onClick={onCreateFolder}
-              className="h-10 rounded-[8px] border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+              className="h-10 rounded-[10px] border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
             >
               New folder
             </button>
           </div>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function SkeletonGrid() {
+  return (
+    <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4">
+      {Array.from({ length: 8 }, (_, index) => (
+        <div
+          key={index}
+          className="overflow-hidden rounded-[10px] border border-slate-200 bg-white shadow-sm"
+        >
+          <div className="aspect-[1.42] w-full animate-pulse bg-slate-100" />
+          <div className="space-y-2 p-3">
+            <div className="h-4 w-2/3 animate-pulse rounded bg-slate-100" />
+            <div className="h-3 w-1/3 animate-pulse rounded bg-slate-100" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SkeletonList() {
+  return (
+    <div className="overflow-hidden rounded-[10px] border border-slate-200 bg-white">
+      {Array.from({ length: 6 }, (_, index) => (
+        <div key={index} className="flex items-center gap-3 border-b border-slate-100 px-4 py-3 last:border-b-0">
+          <div className="h-4 w-4 animate-pulse rounded bg-slate-100" />
+          <div className="h-10 w-10 animate-pulse rounded-[8px] bg-slate-100" />
+          <div className="flex-1 space-y-2">
+            <div className="h-4 w-1/3 animate-pulse rounded bg-slate-100" />
+            <div className="h-3 w-1/4 animate-pulse rounded bg-slate-100" />
+          </div>
+          <div className="h-3 w-12 animate-pulse rounded bg-slate-100" />
+          <div className="h-3 w-16 animate-pulse rounded bg-slate-100" />
+        </div>
+      ))}
     </div>
   );
 }
@@ -1105,15 +1488,23 @@ function Dialog({
   children: React.ReactNode;
   onClose: () => void;
 }) {
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [onClose]);
+
   return (
-    <div className="fixed inset-0 z-40 grid place-items-center bg-slate-950/40 px-4">
+    <div className="fixed inset-0 z-40 grid place-items-center bg-slate-950/40 px-4 backdrop-blur-sm">
       <button
         type="button"
         className="absolute inset-0 cursor-default"
         onClick={onClose}
         aria-label="Close dialog"
       />
-      <div className="relative z-10 w-full max-w-md overflow-hidden rounded-[8px] bg-white shadow-2xl">
+      <div className="relative z-10 w-full max-w-md overflow-hidden rounded-[12px] bg-white shadow-2xl">
         {children}
       </div>
     </div>
@@ -1163,13 +1554,13 @@ function FormDialog({
         <button
           type="button"
           onClick={onClose}
-          className="h-10 rounded-[8px] border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+          className="h-10 rounded-[10px] border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
         >
           Cancel
         </button>
         <button
           type="submit"
-          className="h-10 rounded-[8px] bg-blue-600 px-4 text-sm font-semibold text-white transition hover:bg-blue-700"
+          className="h-10 rounded-[10px] bg-blue-600 px-4 text-sm font-semibold text-white transition hover:bg-blue-700"
         >
           {primaryLabel}
         </button>
@@ -1212,7 +1603,7 @@ function ConfirmDeleteDialog({
       <div className="border-b border-slate-200 p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <div className="grid h-10 w-10 place-items-center rounded-[8px] bg-red-50 text-red-600">
+            <div className="grid h-10 w-10 place-items-center rounded-[10px] bg-red-50 text-red-600">
               <Trash2 className="h-5 w-5" aria-hidden="true" />
             </div>
             <h2 className="mt-4 text-lg font-semibold text-slate-950">{title}</h2>
@@ -1232,14 +1623,14 @@ function ConfirmDeleteDialog({
         <button
           type="button"
           onClick={onClose}
-          className="h-10 rounded-[8px] border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+          className="h-10 rounded-[10px] border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
         >
           Cancel
         </button>
         <button
           type="button"
           onClick={onConfirm}
-          className="h-10 rounded-[8px] bg-red-600 px-4 text-sm font-semibold text-white transition hover:bg-red-700"
+          className="h-10 rounded-[10px] bg-red-600 px-4 text-sm font-semibold text-white transition hover:bg-red-700"
         >
           {isDelete ? "Delete" : "Move to trash"}
         </button>
@@ -1252,10 +1643,12 @@ function NameField({
   label,
   value,
   onChange,
+  placeholder,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
+  placeholder?: string;
 }) {
   return (
     <>
@@ -1265,8 +1658,10 @@ function NameField({
       <input
         id="name-field"
         value={value}
+        autoFocus
+        placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
-        className="mt-2 h-11 w-full rounded-[8px] border border-slate-300 bg-white px-3 text-sm outline-none focus:border-blue-600 focus:ring-4 focus:ring-blue-100"
+        className="mt-2 h-11 w-full rounded-[10px] border border-slate-300 bg-white px-3 text-sm outline-none transition focus:border-blue-600 focus:ring-4 focus:ring-blue-100"
       />
     </>
   );
@@ -1305,28 +1700,31 @@ function PreviewDialog({
           <img
             src={preview}
             alt={item.name}
-            className="mx-auto max-h-[58vh] rounded-[8px] object-contain"
+            className="mx-auto max-h-[58vh] rounded-[10px] object-contain"
+            loading="lazy"
           />
         ) : (
-          <div className="grid h-64 place-items-center rounded-[8px] bg-white">
+          <div className="grid h-64 place-items-center rounded-[10px] bg-white">
             <FileText className="h-16 w-16 text-slate-300" aria-hidden="true" />
           </div>
         )}
       </div>
       <div className="flex justify-end gap-2 border-t border-slate-200 bg-white p-4">
-        <button
-          type="button"
-          onClick={onCopy}
-          className="inline-flex h-10 items-center gap-2 rounded-[8px] border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-        >
-          <Copy className="h-4 w-4" aria-hidden="true" />
-          Copy link
-        </button>
+        {item.url ? (
+          <button
+            type="button"
+            onClick={onCopy}
+            className="inline-flex h-10 items-center gap-2 rounded-[10px] border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+          >
+            <Copy className="h-4 w-4" aria-hidden="true" />
+            Copy link
+          </button>
+        ) : null}
         {item.url ? (
           <button
             type="button"
             onClick={() => window.open(item.url, "_blank", "noopener,noreferrer")}
-            className="inline-flex h-10 items-center gap-2 rounded-[8px] bg-blue-600 px-4 text-sm font-semibold text-white transition hover:bg-blue-700"
+            className="inline-flex h-10 items-center gap-2 rounded-[10px] bg-blue-600 px-4 text-sm font-semibold text-white transition hover:bg-blue-700"
           >
             <Download className="h-4 w-4" aria-hidden="true" />
             Open
@@ -1348,7 +1746,11 @@ function ToastView({ toast }: { toast: Toast }) {
     );
 
   return (
-    <div className="fixed right-5 top-5 z-50 flex max-w-sm items-start gap-3 rounded-[8px] border border-slate-200 bg-white p-3 text-sm text-slate-700 shadow-xl">
+    <div
+      role="status"
+      aria-live="polite"
+      className="fixed right-5 top-5 z-50 flex max-w-sm items-start gap-3 rounded-[10px] border border-slate-200 bg-white p-3 text-sm text-slate-700 shadow-xl"
+    >
       {icon}
       <span>{toast.message}</span>
     </div>
@@ -1356,7 +1758,10 @@ function ToastView({ toast }: { toast: Toast }) {
 }
 
 async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
-  const response = await fetch(input, init);
+  const response = await fetch(input, {
+    credentials: "include",
+    ...init,
+  });
   const contentType = response.headers.get("content-type") ?? "";
   const payload = contentType.includes("application/json")
     ? ((await response.json()) as unknown)
@@ -1371,85 +1776,6 @@ async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Pro
   }
 
   return payload as T;
-}
-
-function normalizeMediaPayload(payload: unknown): MediaItem[] {
-  const record = asRecord(payload);
-  const possibleArrays = [
-    record?.files,
-    record?.folders,
-    record?.data,
-    record?.items,
-    record?.medias,
-    payload,
-  ];
-  const array = possibleArrays.find(Array.isArray) as unknown[] | undefined;
-
-  if (!array) return [];
-
-  return array
-    .map((value) => asRecord(value))
-    .filter((value): value is Record<string, unknown> => Boolean(value))
-    .map((value) => {
-      const id = readString(value, ["_id", "id", "fileId", "folderId", "mediaId"]) || crypto.randomUUID();
-      const name = readString(value, ["name", "fileName", "title", "originalname"]) || "Untitled";
-      const url = readString(value, ["url", "fileUrl", "mediaUrl", "secureUrl", "publicUrl"]);
-      const thumbnailUrl = readString(value, ["thumbnailUrl", "thumbnail", "previewUrl"]);
-      const mimeType = readString(value, ["mimeType", "mimetype", "contentType", "type"]);
-      const explicitType = readString(value, ["mediaType", "objectType", "resourceType", "entityType"]);
-      const isFolder =
-        explicitType?.toLowerCase().includes("folder") ||
-        readString(value, ["type"])?.toLowerCase() === "folder" ||
-        Boolean(value.folder);
-
-      return {
-        id,
-        ghlId: readString(value, ["ghlId", "_id", "id", "fileId", "folderId", "mediaId"]),
-        name,
-        type: isFolder ? "folder" : "file",
-        url,
-        thumbnailUrl,
-        mimeType,
-        size: readNumber(value, ["size", "fileSize", "bytes"]),
-        createdAt: readString(value, ["createdAt", "dateAdded"]),
-        updatedAt: readString(value, ["updatedAt", "modifiedAt"]),
-        parentId: readString(value, ["parentId", "folderId"]) ?? null,
-        ownerName: readString(value, ["ownerName", "ownerEmail"]),
-        ownerEmail: readString(value, ["ownerEmail"]),
-        isOwner: value.isOwner !== false,
-        sharedWithMe: value.sharedWithMe === true,
-        canRename: value.canRename !== false,
-        canMove: value.canMove !== false,
-        canDelete: value.canDelete !== false,
-        canShare: value.canShare !== false,
-        raw: value,
-      };
-    });
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
-}
-
-function readString(record: Record<string, unknown>, keys: string[]) {
-  for (const key of keys) {
-    const value = record[key];
-    if (typeof value === "string" && value) return value;
-    if (typeof value === "number") return String(value);
-  }
-  return undefined;
-}
-
-function readNumber(record: Record<string, unknown>, keys: string[]) {
-  for (const key of keys) {
-    const value = record[key];
-    if (typeof value === "number") return value;
-    if (typeof value === "string") {
-      const number = Number(value);
-      if (!Number.isNaN(number)) return number;
-    }
-  }
-  return undefined;
 }
 
 function mergeFolders(previous: MediaItem[], next: MediaItem[]) {
@@ -1489,6 +1815,17 @@ function formatDate(value?: string) {
     day: "numeric",
     year: "numeric",
   }).format(date);
+}
+
+function deriveInitials(email: string | null) {
+  if (!email) return "U";
+  const local = email.split("@")[0] ?? "";
+  if (!local) return email.slice(0, 1).toUpperCase();
+  const parts = local.split(/[._-]+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return (local[0] + (local[1] ?? "")).toUpperCase();
 }
 
 function errorMessage(error: unknown) {

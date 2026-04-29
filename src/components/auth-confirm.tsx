@@ -52,9 +52,20 @@ export function AuthConfirm() {
       }
       if (!result.data.session) {
         if (mounted) {
-          setError("This confirmation link is missing a valid auth session. Try creating your account again.");
+          setError(
+            "This confirmation link is missing a valid auth session. Try creating your account again.",
+          );
         }
         return;
+      }
+
+      try {
+        await fetch("/api/auth/sync", {
+          method: "POST",
+          credentials: "include",
+        });
+      } catch {
+        // Sync is best-effort; the dashboard load will retry.
       }
 
       window.history.replaceState(null, "", next);
@@ -70,24 +81,24 @@ export function AuthConfirm() {
 
   return (
     <main className="grid min-h-screen place-items-center bg-[#f4f6f8] px-4 text-slate-950">
-      <section className="w-full max-w-md rounded-[8px] border border-slate-200 bg-white p-6 text-center shadow-sm">
+      <section className="w-full max-w-md rounded-[12px] border border-slate-200 bg-white p-6 text-center shadow-sm">
         {error ? (
           <>
-            <div className="mx-auto grid h-12 w-12 place-items-center rounded-[8px] bg-red-50 text-red-600">
+            <div className="mx-auto grid h-12 w-12 place-items-center rounded-[10px] bg-red-50 text-red-600">
               <AlertCircle className="h-6 w-6" aria-hidden="true" />
             </div>
-            <h1 className="mt-4 text-xl font-semibold">Email confirmation could not be verified</h1>
+            <h1 className="mt-4 text-xl font-semibold">Email confirmation failed</h1>
             <p className="mt-2 text-sm leading-6 text-slate-600">{error}</p>
             <a
               href="/login"
-              className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-blue-600 px-4 text-sm font-semibold text-white transition hover:bg-blue-700"
+              className="mt-5 inline-flex h-10 items-center rounded-[10px] bg-blue-600 px-4 text-sm font-semibold text-white transition hover:bg-blue-700"
             >
               Back to login
             </a>
           </>
         ) : (
           <>
-            <div className="mx-auto grid h-12 w-12 place-items-center rounded-[8px] bg-blue-50 text-blue-600">
+            <div className="mx-auto grid h-12 w-12 place-items-center rounded-[10px] bg-blue-50 text-blue-600">
               <Loader2 className="h-6 w-6 animate-spin" aria-hidden="true" />
             </div>
             <h1 className="mt-4 text-xl font-semibold">Confirming your account</h1>

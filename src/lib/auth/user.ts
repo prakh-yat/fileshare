@@ -25,10 +25,10 @@ export async function getRequiredAppUser() {
   return appUser;
 }
 
-async function upsertAppUser(user: User) {
+export async function upsertAppUser(user: Pick<User, "id" | "email">) {
   const prisma = getPrisma();
   const email = user.email ?? null;
-  const emailNormalized = email?.toLowerCase() ?? null;
+  const emailNormalized = email?.toLowerCase().trim() || null;
 
   const appUser = await prisma.appUser.upsert({
     where: { supabaseUserId: user.id },

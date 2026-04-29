@@ -138,6 +138,7 @@ export async function listMediaObjects({
   } else {
     where = {
       isDeleted: false,
+      ownerId: { not: appUser.id },
       shares: {
         some: shareRecipientWhere(appUser),
       },
@@ -148,9 +149,10 @@ export async function listMediaObjects({
   const objects = await prisma.mediaObject.findMany({
     where,
     include: mediaObjectInclude,
+    orderBy: prismaOrderBy(sort),
   });
 
-  return sortMediaObjects(objects, sort).map((object) => serializeMediaObject(object, appUser));
+  return objects.map((object) => serializeMediaObject(object, appUser));
 }
 
 export async function syncTrackedMediaObjectsFromGhl(
@@ -385,6 +387,32 @@ export async function shareMediaObjects({
   }
 
   const prisma = getPrisma();
+
+  const ownershipCheck = await prisma.mediaObject.findMany({
+    where: {
+      id: { in: uniqueIds },
+      isDeleted: false,
+    },
+    select: {
+      id: true,
+      ownerId: true,
+    },
+  });
+
+  if (ownershipCheck.length !== uniqueIds.length) {
+    throw new MediaError("Some files or folders no longer exist.", 404);
+  }
+
+  const notOwnedByRequester = ownershipCheck.filter(
+    (object) => object.ownerId !== owner.id,
+  );
+  if (notOwnedByRequester.length) {
+    throw new MediaError(
+      "Only the owner of a file or folder can share it. Re-sharing items you received is not permitted.",
+      403,
+    );
+  }
+
   const objects = await prisma.mediaObject.findMany({
     where: {
       id: { in: uniqueIds },
@@ -393,10 +421,6 @@ export async function shareMediaObjects({
     },
     include: mediaObjectInclude,
   });
-
-  if (objects.length !== uniqueIds.length) {
-    throw new MediaError("You can only share files or folders you own.", 403);
-  }
 
   const objectsById = new Map(objects.map((object) => [object.id, object]));
   const orderedObjects = uniqueIds
@@ -520,7 +544,9 @@ export function serializeMediaObject(
 }
 
 async function requireReadableFolder(id: string, appUser: AppUser) {
-  const object = await getPrisma().mediaObject.findFirst({
+  const prisma = getPrisma();
+
+  const object = await prisma.mediaObject.findFirst({
     where: {
       id,
       isDeleted: false,
@@ -528,31 +554,56 @@ async function requireReadableFolder(id: string, appUser: AppUser) {
     include: mediaObjectInclude,
   });
 
-  if (!object || object.type !== "FOLDER" || !(await canReadMediaObject(object, appUser))) {
+  if (!object || object.type !== "FOLDER") {
+    throw new MediaError("Folder was not found.", 404);
+  }
+
+  if (object.ownerId === appUser.id || isDirectShare(object, appUser)) {
+    return object;
+  }
+
+  const ancestorIds = await collectAncestorIds(object.id);
+  if (!ancestorIds.length) {
+    throw new MediaError("Folder was not found.", 404);
+  }
+
+  const ancestor = await prisma.mediaObject.findFirst({
+    where: {
+      id: { in: ancestorIds },
+      isDeleted: false,
+      OR: [
+        { ownerId: appUser.id },
+        { shares: { some: shareRecipientWhere(appUser) } },
+      ],
+    },
+    select: { id: true },
+  });
+
+  if (!ancestor) {
     throw new MediaError("Folder was not found.", 404);
   }
 
   return object;
 }
 
-async function canReadMediaObject(object: MediaObjectWithAccess, appUser: AppUser) {
-  if (object.ownerId === appUser.id || isDirectShare(object, appUser)) return true;
-
-  let parentId = object.parentId;
+async function collectAncestorIds(startId: string) {
+  const prisma = getPrisma();
+  const ids: string[] = [];
+  let currentId: string | null = startId;
   let depth = 0;
 
-  while (parentId && depth < 50) {
-    const parent = await getPrisma().mediaObject.findUnique({
-      where: { id: parentId },
-      include: mediaObjectInclude,
+  while (currentId && depth < 50) {
+    const node: { parentId: string | null } | null = await prisma.mediaObject.findUnique({
+      where: { id: currentId },
+      select: { parentId: true },
     });
-    if (!parent || parent.isDeleted) return false;
-    if (parent.ownerId === appUser.id || isDirectShare(parent, appUser)) return true;
-    parentId = parent.parentId;
+    if (!node?.parentId) break;
+    ids.push(node.parentId);
+    currentId = node.parentId;
     depth += 1;
   }
 
-  return false;
+  return ids;
 }
 
 function isDirectShare(object: MediaObjectWithAccess, appUser: AppUser) {
@@ -577,17 +628,18 @@ function mediaTypeWhere(filter: MediaFilter): Prisma.MediaObjectWhereInput {
   return {};
 }
 
-function sortMediaObjects(objects: MediaObjectWithAccess[], sort: MediaSort) {
-  return [...objects].sort((a, b) => {
-    if (sort === "name-asc" || sort === "name-desc") {
-      const value = a.name.localeCompare(b.name);
-      return sort === "name-asc" ? value : -value;
-    }
-
-    const aTime = (a.ghlUpdatedAt ?? a.updatedAt).getTime();
-    const bTime = (b.ghlUpdatedAt ?? b.updatedAt).getTime();
-    return sort === "updated-asc" ? aTime - bTime : bTime - aTime;
-  });
+function prismaOrderBy(sort: MediaSort): Prisma.MediaObjectOrderByWithRelationInput[] {
+  switch (sort) {
+    case "name-asc":
+      return [{ type: "asc" }, { name: "asc" }];
+    case "name-desc":
+      return [{ type: "asc" }, { name: "desc" }];
+    case "updated-asc":
+      return [{ type: "asc" }, { ghlUpdatedAt: "asc" }, { updatedAt: "asc" }];
+    case "updated-desc":
+    default:
+      return [{ type: "asc" }, { ghlUpdatedAt: "desc" }, { updatedAt: "desc" }];
+  }
 }
 
 function mediaUpdateData(normalized: NormalizedMedia): MediaObjectScalarData {

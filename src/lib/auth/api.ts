@@ -1,12 +1,13 @@
+import type { AppUser } from "@prisma/client";
 import type { User } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
-import { getPrisma } from "@/lib/prisma";
+import { upsertAppUser } from "@/lib/auth/user";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export type ApiAuthResult =
   | {
-      appUser: Awaited<ReturnType<typeof upsertAppUser>>;
+      appUser: AppUser;
       supabaseUser: User;
       response?: never;
     }
@@ -32,37 +33,4 @@ export async function requireApiUser(): Promise<ApiAuthResult> {
     appUser: await upsertAppUser(user),
     supabaseUser: user,
   };
-}
-
-async function upsertAppUser(user: User) {
-  const prisma = getPrisma();
-  const email = user.email ?? null;
-  const emailNormalized = email?.toLowerCase() ?? null;
-
-  const appUser = await prisma.appUser.upsert({
-    where: { supabaseUserId: user.id },
-    update: {
-      email,
-      emailNormalized,
-    },
-    create: {
-      supabaseUserId: user.id,
-      email,
-      emailNormalized,
-    },
-  });
-
-  if (emailNormalized) {
-    await prisma.mediaShare.updateMany({
-      where: {
-        sharedWithEmail: emailNormalized,
-        sharedWithId: null,
-      },
-      data: {
-        sharedWithId: appUser.id,
-      },
-    });
-  }
-
-  return appUser;
 }

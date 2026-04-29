@@ -1,6 +1,7 @@
 import type { EmailOtpType } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
 
+import { upsertAppUser } from "@/lib/auth/user";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export async function GET(request: NextRequest) {
@@ -27,6 +28,13 @@ export async function GET(request: NextRequest) {
     if (error) return redirectToLogin(error.message);
   } else {
     return NextResponse.redirect(new URL(`/auth/confirm${requestUrl.search}`, requestUrl.origin));
+  }
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (user) {
+    await upsertAppUser(user);
   }
 
   return NextResponse.redirect(new URL(next, requestUrl.origin));
