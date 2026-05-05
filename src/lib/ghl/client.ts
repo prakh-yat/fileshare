@@ -195,6 +195,8 @@ async function refreshIfNeeded(connection: GhlAppConnection) {
   if (!refreshToken) return connection;
 
   const config = getGhlConfig();
+  if (!config.clientId || !config.clientSecret) return connection;
+
   const params = new URLSearchParams({
     client_id: config.clientId,
     client_secret: config.clientSecret,

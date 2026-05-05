@@ -5,8 +5,8 @@ export const DEFAULT_GHL_SCOPES =
 
 export function getGhlConfig() {
   return {
-    clientId: getEnv("GHL_CLIENT_ID"),
-    clientSecret: getEnv("GHL_CLIENT_SECRET"),
+    clientId: process.env.GHL_CLIENT_ID ?? "",
+    clientSecret: process.env.GHL_CLIENT_SECRET ?? "",
     authUrl: getEnv(
       "GHL_AUTH_URL",
       "https://marketplace.leadconnectorhq.com/oauth/chooselocation",
