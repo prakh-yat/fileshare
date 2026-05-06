@@ -1,4 +1,4 @@
-import { smtpSend, type SmtpConfig, type SmtpResult } from "@/lib/smtp";
+import { getSmtpConfig, hasSmtpCredentials, smtpSend, type SmtpResult } from "@/lib/smtp";
 
 export type AuthEmailKind = "confirmation" | "recovery";
 
@@ -16,22 +16,7 @@ export type SendAuthEmailResult = {
   error?: string;
 };
 
-function getSmtpConfig(): SmtpConfig | null {
-  const host = process.env.SUPABASE_SMTP_HOST;
-  const user = process.env.SUPABASE_SMTP_USER;
-  const pass = process.env.SUPABASE_SMTP_PASS;
-  const fromEmail = process.env.SUPABASE_SMTP_ADMIN_EMAIL || user;
-  const fromName = process.env.SUPABASE_SMTP_SENDER_NAME || "TDA FileShare";
-  const port = Number.parseInt(process.env.SUPABASE_SMTP_PORT || "587", 10);
-
-  if (!host || !user || !pass || !fromEmail) return null;
-
-  return { host, port, user, pass, fromEmail, fromName };
-}
-
-export function hasSmtpCredentials() {
-  return getSmtpConfig() !== null;
-}
+export { hasSmtpCredentials };
 
 export async function sendAuthEmail(input: SendAuthEmailInput): Promise<SendAuthEmailResult> {
   const config = getSmtpConfig();

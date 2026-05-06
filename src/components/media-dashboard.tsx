@@ -20,6 +20,7 @@ import {
   MoreVertical,
   Move,
   Pencil,
+  Plus,
   RefreshCw,
   Search,
   Share2,
@@ -95,6 +96,25 @@ type UploadProgress = {
   fileName: string;
 };
 
+type ShareResponse = {
+  recipients?: Array<{
+    sharedWithEmail: string;
+    emailNotification?: {
+      delivered: boolean;
+      error?: string;
+    };
+  }>;
+};
+
+type MenuPosition = {
+  left: number;
+  top: number;
+};
+
+const MENU_WIDTH = 192;
+const MENU_ESTIMATED_HEIGHT = 286;
+const MENU_MARGIN = 8;
+
 export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashboardProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [activeScope, setActiveScope] = useState<ActiveScope>("mine");
@@ -102,6 +122,7 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
   const [knownFolders, setKnownFolders] = useState<MediaItem[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
+  const [activeMenuPosition, setActiveMenuPosition] = useState<MenuPosition | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [filterMode, setFilterMode] = useState<FilterMode>("all");
   const [sortMode, setSortMode] = useState<SortMode>("updated-desc");
@@ -114,6 +135,7 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
   const [dragOver, setDragOver] = useState(false);
   const [dialog, setDialog] = useState<DialogState>(null);
   const [textValue, setTextValue] = useState("");
+  const [shareEmails, setShareEmails] = useState<string[]>([""]);
   const [destinationId, setDestinationId] = useState("");
   const [toast, setToast] = useState<Toast | null>(null);
   const [, startTransition] = useTransition();
@@ -137,6 +159,10 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
     selectedItems.length > 0 && selectedShareableItems.length === selectedItems.length;
   const hasStorageReady = initialStorageReady;
   const userInitials = useMemo(() => deriveInitials(currentUser.email), [currentUser.email]);
+  const visibleSelectedCount = useMemo(
+    () => visibleItemsCount(items, selectedIds, searchQuery),
+    [items, searchQuery, selectedIds],
+  );
 
   const showToast = useCallback((message: string, type: Toast["type"] = "info") => {
     setToast({ message, type });
@@ -261,20 +287,28 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
   useEffect(() => {
     if (!activeMenuId) return;
 
+    const closeMenu = () => {
+      setActiveMenuId(null);
+      setActiveMenuPosition(null);
+    };
     function handleClick(event: MouseEvent) {
       const target = event.target as HTMLElement | null;
       if (target?.closest("[data-menu-host='true']")) return;
-      setActiveMenuId(null);
+      closeMenu();
     }
     function handleKey(event: KeyboardEvent) {
-      if (event.key === "Escape") setActiveMenuId(null);
+      if (event.key === "Escape") closeMenu();
     }
 
     window.addEventListener("mousedown", handleClick);
     window.addEventListener("keydown", handleKey);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
     return () => {
       window.removeEventListener("mousedown", handleClick);
       window.removeEventListener("keydown", handleKey);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
     };
   }, [activeMenuId]);
 
@@ -290,6 +324,13 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
     if (!query) return items;
     return items.filter((item) => item.name.toLowerCase().includes(query));
   }, [items, searchQuery]);
+  const allVisibleSelected =
+    visibleItems.length > 0 && visibleSelectedCount === visibleItems.length;
+  const someVisibleSelected = visibleSelectedCount > 0 && !allVisibleSelected;
+  const activeMenuItem = useMemo(
+    () => items.find((item) => item.id === activeMenuId) ?? null,
+    [activeMenuId, items],
+  );
 
   async function handleLogout() {
     try {
@@ -491,7 +532,7 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
 
   async function runMutation(work: () => Promise<void>) {
     setBusy(true);
-    setActiveMenuId(null);
+    closeActiveMenu();
     try {
       await work();
     } catch (error) {
@@ -502,9 +543,13 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
   }
 
   async function shareItems(targets: MediaItem[]) {
-    const email = textValue.trim();
-    if (!email) {
-      showToast("Enter an email address.", "error");
+    const { emails, invalid } = normalizeEmailFields(shareEmails);
+    if (!emails.length) {
+      showToast("Enter at least one email address.", "error");
+      return;
+    }
+    if (invalid.length) {
+      showToast(`Check ${invalid[0]}; it does not look like a valid email address.`, "error");
       return;
     }
     if (!targets.length) return;
@@ -517,19 +562,72 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
     }
 
     await runMutation(async () => {
-      await requestJson<unknown>("/api/media/share", {
+      const response = await requestJson<ShareResponse>("/api/media/share", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          email,
+          emails,
           mediaObjectIds: targets.map((target) => target.id),
         }),
       });
       setDialog(null);
-      showToast(
-        `Shared ${targets.length} item${targets.length === 1 ? "" : "s"} with ${email}.`,
-        "success",
-      );
+
+      const failedNotifications =
+        response.recipients?.filter((recipient) => recipient.emailNotification?.delivered === false) ??
+        [];
+      if (failedNotifications.length) {
+        showToast(
+          `Shared access, but ${failedNotifications.length} email notification${
+            failedNotifications.length === 1 ? "" : "s"
+          } could not be delivered.`,
+          "error",
+        );
+        return;
+      }
+
+      showToast(formatShareSuccess(targets.length, emails.length), "success");
+    });
+  }
+
+  function addShareEmailField() {
+    setShareEmails((previous) => [...previous, ""]);
+  }
+
+  function removeShareEmailField(index: number) {
+    setShareEmails((previous) => {
+      const next = previous.filter((_, entryIndex) => entryIndex !== index);
+      return next.length ? next : [""];
+    });
+  }
+
+  function updateShareEmailField(index: number, value: string) {
+    const parsed = splitEmailInput(value);
+    if (parsed.length > 1) {
+      replaceShareEmailField(index, parsed);
+      return;
+    }
+
+    setShareEmails((previous) =>
+      previous.map((entry, entryIndex) => (entryIndex === index ? value : entry)),
+    );
+  }
+
+  function handleShareEmailPaste(index: number, event: React.ClipboardEvent<HTMLInputElement>) {
+    const parsed = splitEmailInput(event.clipboardData.getData("text"));
+    if (parsed.length <= 1) return;
+
+    event.preventDefault();
+    replaceShareEmailField(index, parsed);
+  }
+
+  function replaceShareEmailField(index: number, emails: string[]) {
+    setShareEmails((previous) => {
+      const next = [
+        ...previous.slice(0, index),
+        ...emails,
+        ...previous.slice(index + 1),
+      ];
+      return next.length ? next : [""];
     });
   }
 
@@ -568,11 +666,31 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
 
   function selectAllVisible() {
     if (!visibleItems.length) return;
-    if (selectedIds.size === visibleItems.length) {
-      setSelectedIds(new Set());
+    setSelectedIds((previous) => {
+      if (allVisibleSelected) {
+        const next = new Set(previous);
+        visibleItems.forEach((item) => next.delete(item.id));
+        return next;
+      }
+      return new Set([...previous, ...visibleItems.map((item) => item.id)]);
+    });
+  }
+
+  function closeActiveMenu() {
+    setActiveMenuId(null);
+    setActiveMenuPosition(null);
+  }
+
+  function toggleItemMenu(event: React.MouseEvent<HTMLButtonElement>, item: MediaItem) {
+    event.stopPropagation();
+
+    if (activeMenuId === item.id) {
+      closeActiveMenu();
       return;
     }
-    setSelectedIds(new Set(visibleItems.map((item) => item.id)));
+
+    setActiveMenuId(item.id);
+    setActiveMenuPosition(getMenuPosition(event.currentTarget.getBoundingClientRect()));
   }
 
   function openFolderDialog() {
@@ -597,7 +715,7 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
       showToast("Only the owner of this item can share it.", "error");
       return;
     }
-    setTextValue("");
+    setShareEmails([""]);
     setDialog({ kind: "share", items: [item] });
   }
 
@@ -609,7 +727,7 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
       );
       return;
     }
-    setTextValue("");
+    setShareEmails([""]);
     setDialog({ kind: "share", items: selectedItems });
   }
 
@@ -909,6 +1027,15 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
               ) : visibleItems.length ? (
                 viewMode === "grid" ? (
                   <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4">
+                    <div className="col-span-full">
+                      <GridSelectionBar
+                        allSelected={allVisibleSelected}
+                        partiallySelected={someVisibleSelected}
+                        selectedCount={visibleSelectedCount}
+                        totalCount={visibleItems.length}
+                        onToggle={selectAllVisible}
+                      />
+                    </div>
                     {visibleItems.map((item) => (
                       <MediaCard
                         key={item.id}
@@ -917,9 +1044,7 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
                         activeMenu={activeMenuId === item.id}
                         onSelect={() => toggleSelected(item)}
                         onOpen={() => openFolder(item)}
-                        onMenu={() =>
-                          setActiveMenuId((current) => (current === item.id ? null : item.id))
-                        }
+                        onMenu={(event) => toggleItemMenu(event, item)}
                         onPreview={() => setDialog({ kind: "preview", item })}
                         onCopy={() => void copyLink(item)}
                         onRename={() => openRenameDialog(item)}
@@ -937,7 +1062,7 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
                         onClick={selectAllVisible}
                         className="grid h-7 w-7 place-items-center rounded-[6px] text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
                         title={
-                          selectedIds.size === visibleItems.length
+                          allVisibleSelected
                             ? "Clear selection"
                             : "Select all"
                         }
@@ -945,15 +1070,15 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
                         <input
                           type="checkbox"
                           aria-label="Select all"
-                          checked={selectedIds.size > 0 && selectedIds.size === visibleItems.length}
+                          checked={allVisibleSelected}
                           ref={(node) => {
                             if (node) {
-                              node.indeterminate =
-                                selectedIds.size > 0 && selectedIds.size < visibleItems.length;
+                              node.indeterminate = someVisibleSelected;
                             }
                           }}
-                          onChange={selectAllVisible}
-                          className="h-4 w-4"
+                          readOnly
+                          tabIndex={-1}
+                          className="pointer-events-none h-4 w-4"
                         />
                       </button>
                       <span>Name</span>
@@ -970,9 +1095,7 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
                         activeMenu={activeMenuId === item.id}
                         onSelect={() => toggleSelected(item)}
                         onOpen={() => openFolder(item)}
-                        onMenu={() =>
-                          setActiveMenuId((current) => (current === item.id ? null : item.id))
-                        }
+                        onMenu={(event) => toggleItemMenu(event, item)}
                         onPreview={() => setDialog({ kind: "preview", item })}
                         onCopy={() => void copyLink(item)}
                         onRename={() => openRenameDialog(item)}
@@ -995,6 +1118,37 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
           )}
         </section>
       </main>
+
+      {activeMenuItem && activeMenuPosition ? (
+        <EntryMenu
+          item={activeMenuItem}
+          position={activeMenuPosition}
+          onPreview={() => {
+            closeActiveMenu();
+            setDialog({ kind: "preview", item: activeMenuItem });
+          }}
+          onCopy={() => {
+            closeActiveMenu();
+            void copyLink(activeMenuItem);
+          }}
+          onRename={() => {
+            closeActiveMenu();
+            openRenameDialog(activeMenuItem);
+          }}
+          onMove={() => {
+            closeActiveMenu();
+            openMoveDialog(activeMenuItem);
+          }}
+          onShare={() => {
+            closeActiveMenu();
+            openShareDialog(activeMenuItem);
+          }}
+          onDelete={() => {
+            closeActiveMenu();
+            openDeleteDialog(activeMenuItem);
+          }}
+        />
+      ) : null}
 
       {dialog ? (
         <Dialog onClose={() => setDialog(null)}>
@@ -1053,7 +1207,13 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
               onPrimary={() => void shareItems(dialog.items)}
               onClose={() => setDialog(null)}
             >
-              <NameField value={textValue} onChange={setTextValue} label="Email address" placeholder="recipient@example.com" />
+              <ShareEmailFields
+                emails={shareEmails}
+                onAdd={addShareEmailField}
+                onChange={updateShareEmailField}
+                onPaste={handleShareEmailPaste}
+                onRemove={removeShareEmailField}
+              />
             </FormDialog>
           ) : dialog.kind === "delete" ? (
             <ConfirmDeleteDialog
@@ -1153,6 +1313,46 @@ function SegmentedButton({
   );
 }
 
+function GridSelectionBar({
+  allSelected,
+  partiallySelected,
+  selectedCount,
+  totalCount,
+  onToggle,
+}: {
+  allSelected: boolean;
+  partiallySelected: boolean;
+  selectedCount: number;
+  totalCount: number;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-[10px] border border-slate-200 bg-white px-3 py-2 shadow-sm">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="inline-flex h-9 items-center gap-2 rounded-[8px] px-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+      >
+        <input
+          type="checkbox"
+          checked={allSelected}
+          ref={(node) => {
+            if (node) node.indeterminate = partiallySelected;
+          }}
+          readOnly
+          tabIndex={-1}
+          className="pointer-events-none h-4 w-4"
+          aria-label={allSelected ? "Clear selection" : "Select all"}
+        />
+        <span>{allSelected ? "Clear selection" : "Select all"}</span>
+      </button>
+      <span className="text-xs font-medium text-slate-500">
+        {selectedCount} of {totalCount} selected
+      </span>
+    </div>
+  );
+}
+
 function MediaCard(props: MediaEntryProps) {
   const { item, selected, onSelect, onOpen, activeMenu, onMenu } = props;
   const preview = item.thumbnailUrl || item.url;
@@ -1209,7 +1409,9 @@ function MediaCard(props: MediaEntryProps) {
         <button
           type="button"
           onClick={onMenu}
-          className="grid h-8 w-8 place-items-center rounded-[6px] bg-white text-slate-700 shadow-sm transition hover:bg-slate-50"
+          className={`grid h-8 w-8 place-items-center rounded-[6px] bg-white text-slate-700 shadow-sm transition hover:bg-slate-50 ${
+            activeMenu ? "ring-2 ring-blue-500" : ""
+          }`}
           title="More actions"
         >
           <MoreVertical className="h-4 w-4" aria-hidden="true" />
@@ -1226,8 +1428,6 @@ function MediaCard(props: MediaEntryProps) {
               : formatBytes(item.size)}
         </p>
       </div>
-
-      {activeMenu ? <EntryMenu {...props} /> : null}
     </article>
   );
 }
@@ -1276,12 +1476,13 @@ function MediaRow(props: MediaEntryProps) {
       <button
         type="button"
         onClick={onMenu}
-        className="grid h-8 w-8 place-items-center rounded-[6px] text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+        className={`grid h-8 w-8 place-items-center rounded-[6px] text-slate-500 transition hover:bg-slate-100 hover:text-slate-900 ${
+          activeMenu ? "bg-slate-100 text-slate-900 ring-2 ring-blue-500" : ""
+        }`}
         title="More actions"
       >
         <MoreVertical className="h-4 w-4" aria-hidden="true" />
       </button>
-      {activeMenu ? <EntryMenu {...props} /> : null}
     </div>
   );
 }
@@ -1292,7 +1493,7 @@ type MediaEntryProps = {
   activeMenu: boolean;
   onSelect: () => void;
   onOpen: () => void;
-  onMenu: () => void;
+  onMenu: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onPreview: () => void;
   onCopy: () => void;
   onRename: () => void;
@@ -1303,17 +1504,28 @@ type MediaEntryProps = {
 
 function EntryMenu({
   item,
+  position,
   onPreview,
   onCopy,
   onRename,
   onMove,
   onShare,
   onDelete,
-}: MediaEntryProps) {
+}: {
+  item: MediaItem;
+  position: MenuPosition;
+  onPreview: () => void;
+  onCopy: () => void;
+  onRename: () => void;
+  onMove: () => void;
+  onShare: () => void;
+  onDelete: () => void;
+}) {
   return (
     <div
-      className="absolute right-3 top-12 z-[80] w-48 overflow-hidden rounded-[10px] border border-slate-200 bg-white py-1 text-sm text-slate-700 shadow-xl"
+      className="fixed z-[1000] max-h-[calc(100vh-16px)] w-48 overflow-auto rounded-[10px] border border-slate-200 bg-white py-1 text-sm text-slate-700 shadow-2xl"
       data-menu-host="true"
+      style={{ left: position.left, top: position.top }}
     >
       {item.type === "file" ? (
         <MenuAction icon={<Eye className="h-4 w-4" />} label="Preview" onClick={onPreview} />
@@ -1667,6 +1879,67 @@ function NameField({
   );
 }
 
+function ShareEmailFields({
+  emails,
+  onAdd,
+  onChange,
+  onPaste,
+  onRemove,
+}: {
+  emails: string[];
+  onAdd: () => void;
+  onChange: (index: number, value: string) => void;
+  onPaste: (index: number, event: React.ClipboardEvent<HTMLInputElement>) => void;
+  onRemove: (index: number) => void;
+}) {
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-3">
+        <label className="text-sm font-medium text-slate-700" htmlFor="share-email-0">
+          Email recipients
+        </label>
+        <button
+          type="button"
+          onClick={onAdd}
+          className="inline-flex h-8 items-center gap-1 rounded-[8px] border border-slate-300 bg-white px-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+          aria-label="Add recipient"
+          title="Add recipient"
+        >
+          <Plus className="h-4 w-4" aria-hidden="true" />
+          Add
+        </button>
+      </div>
+      <div className="mt-2 space-y-2">
+        {emails.map((email, index) => (
+          <div key={index} className="flex items-center gap-2">
+            <input
+              id={index === 0 ? "share-email-0" : undefined}
+              value={email}
+              autoFocus={index === 0}
+              inputMode="email"
+              autoComplete="email"
+              placeholder={index === 0 ? "recipient@example.com" : "another@example.com"}
+              onChange={(event) => onChange(index, event.target.value)}
+              onPaste={(event) => onPaste(index, event)}
+              className="h-11 min-w-0 flex-1 rounded-[10px] border border-slate-300 bg-white px-3 text-sm outline-none transition focus:border-blue-600 focus:ring-4 focus:ring-blue-100"
+            />
+            <button
+              type="button"
+              onClick={() => onRemove(index)}
+              disabled={emails.length === 1}
+              className="grid h-10 w-10 shrink-0 place-items-center rounded-[8px] text-slate-500 transition hover:bg-slate-100 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
+              aria-label="Remove recipient"
+              title="Remove recipient"
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function PreviewDialog({
   item,
   onClose,
@@ -1826,6 +2099,71 @@ function deriveInitials(email: string | null) {
     return (parts[0][0] + parts[1][0]).toUpperCase();
   }
   return (local[0] + (local[1] ?? "")).toUpperCase();
+}
+
+function visibleItemsCount(items: MediaItem[], selectedIds: Set<string>, searchQuery: string) {
+  const query = searchQuery.trim().toLowerCase();
+  return items.filter((item) => {
+    if (!selectedIds.has(item.id)) return false;
+    return !query || item.name.toLowerCase().includes(query);
+  }).length;
+}
+
+function getMenuPosition(rect: DOMRect): MenuPosition {
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const left = clamp(
+    rect.right - MENU_WIDTH,
+    MENU_MARGIN,
+    Math.max(MENU_MARGIN, viewportWidth - MENU_WIDTH - MENU_MARGIN),
+  );
+
+  const below = rect.bottom + MENU_MARGIN;
+  const above = rect.top - MENU_ESTIMATED_HEIGHT - MENU_MARGIN;
+  const top =
+    below + MENU_ESTIMATED_HEIGHT <= viewportHeight - MENU_MARGIN
+      ? below
+      : clamp(above, MENU_MARGIN, Math.max(MENU_MARGIN, viewportHeight - MENU_ESTIMATED_HEIGHT - MENU_MARGIN));
+
+  return { left, top };
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function splitEmailInput(value: string) {
+  const matches = value.match(/[^\s,;<>"']+@[^\s,;<>"']+/g);
+  const candidates = matches?.length
+    ? matches
+    : value.split(/[\s,;]+/).filter(Boolean);
+
+  return candidates.map((entry) => entry.trim().toLowerCase()).filter(Boolean);
+}
+
+function normalizeEmailFields(fields: string[]) {
+  const emails: string[] = [];
+  const invalid: string[] = [];
+
+  fields.flatMap(splitEmailInput).forEach((email) => {
+    if (!isEmailAddress(email)) {
+      invalid.push(email);
+      return;
+    }
+    if (!emails.includes(email)) emails.push(email);
+  });
+
+  return { emails, invalid };
+}
+
+function isEmailAddress(value: string) {
+  return /^[^\s@]+@[^\s@]+$/.test(value);
+}
+
+function formatShareSuccess(itemCount: number, recipientCount: number) {
+  const itemLabel = `${itemCount} item${itemCount === 1 ? "" : "s"}`;
+  const recipientLabel = `${recipientCount} ${recipientCount === 1 ? "person" : "people"}`;
+  return `Shared ${itemLabel} with ${recipientLabel}.`;
 }
 
 function errorMessage(error: unknown) {

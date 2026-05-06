@@ -373,10 +373,7 @@ export async function shareMediaObjects({
   owner: AppUser;
   email: string;
 }) {
-  const sharedWithEmail = email.trim().toLowerCase();
-  if (!sharedWithEmail || !sharedWithEmail.includes("@")) {
-    throw new MediaError("Enter a valid email address.", 400);
-  }
+  const [sharedWithEmail] = normalizeShareRecipientEmails(email);
   if (owner.emailNormalized && owner.emailNormalized === sharedWithEmail) {
     throw new MediaError("You already own this item.", 400);
   }
@@ -460,6 +457,24 @@ export async function shareMediaObjects({
     objects: orderedObjects,
     webhookItems: orderedObjects.map((object) => toSharedMediaSummary(object)),
   };
+}
+
+export function normalizeShareRecipientEmails(values: string | string[]) {
+  const rawValues = Array.isArray(values) ? values : [values];
+  const emails: string[] = [];
+
+  rawValues.flatMap(splitShareEmailInput).forEach((email) => {
+    if (!isShareEmailAddress(email)) {
+      throw new MediaError(`Enter a valid email address: ${email}`, 400);
+    }
+    if (!emails.includes(email)) emails.push(email);
+  });
+
+  if (!emails.length) {
+    throw new MediaError("Enter at least one email address.", 400);
+  }
+
+  return emails;
 }
 
 export async function sendFileShareWebhook({
@@ -677,4 +692,17 @@ function asRecord(value: Prisma.JsonValue | null): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function splitShareEmailInput(value: string) {
+  const matches = value.match(/[^\s,;<>"']+@[^\s,;<>"']+/g);
+  const candidates = matches?.length
+    ? matches
+    : value.split(/[\s,;]+/).filter(Boolean);
+
+  return candidates.map((entry) => entry.trim().toLowerCase()).filter(Boolean);
+}
+
+function isShareEmailAddress(value: string) {
+  return /^[^\s@]+@[^\s@]+$/.test(value);
 }

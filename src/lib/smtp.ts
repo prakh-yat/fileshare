@@ -17,6 +17,23 @@ export type SmtpResult = {
   durationMs: number;
 };
 
+export function getSmtpConfig(): SmtpConfig | null {
+  const host = process.env.SUPABASE_SMTP_HOST;
+  const user = process.env.SUPABASE_SMTP_USER;
+  const pass = process.env.SUPABASE_SMTP_PASS;
+  const fromEmail = process.env.SUPABASE_SMTP_ADMIN_EMAIL || user;
+  const fromName = process.env.SUPABASE_SMTP_SENDER_NAME || "TDA FileShare";
+  const port = Number.parseInt(process.env.SUPABASE_SMTP_PORT || "587", 10);
+
+  if (!host || !user || !pass || !fromEmail) return null;
+
+  return { host, port, user, pass, fromEmail, fromName };
+}
+
+export function hasSmtpCredentials() {
+  return getSmtpConfig() !== null;
+}
+
 function readUntil(socket: net.Socket | tls.TLSSocket, regex: RegExp, timeout = 15000) {
   return new Promise<string>((resolve, reject) => {
     let buffer = "";
