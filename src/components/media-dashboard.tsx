@@ -7,11 +7,16 @@ import {
   Copy,
   Download,
   Eye,
+  FileArchive,
+  FileAudio,
+  FileCode,
+  FileImage,
+  FileSpreadsheet,
   FileText,
+  FileVideo,
   Folder,
   FolderPlus,
   Grid2X2,
-  ImageIcon,
   LayoutDashboard,
   Link2,
   List,
@@ -1355,7 +1360,6 @@ function GridSelectionBar({
 
 function MediaCard(props: MediaEntryProps) {
   const { item, selected, onSelect, onOpen, activeMenu, onMenu } = props;
-  const preview = item.thumbnailUrl || item.url;
 
   return (
     <article
@@ -1371,17 +1375,8 @@ function MediaCard(props: MediaEntryProps) {
           <div className="flex h-full items-center justify-center bg-slate-100">
             <Folder className="h-14 w-14 text-slate-400" aria-hidden="true" />
           </div>
-        ) : preview && isImageItem(item) ? (
-          <div
-            className="h-full w-full bg-cover bg-center transition-transform duration-300 group-hover:scale-[1.02]"
-            style={{
-              backgroundImage: `linear-gradient(to bottom, transparent 45%, rgba(15, 23, 42, 0.7)), url("${preview}")`,
-            }}
-          />
         ) : (
-          <div className="flex h-full items-center justify-center bg-slate-100">
-            <FileText className="h-14 w-14 text-slate-400" aria-hidden="true" />
-          </div>
+          <MediaThumbnail item={item} />
         )}
       </button>
 
@@ -1452,13 +1447,13 @@ function MediaRow(props: MediaEntryProps) {
         onClick={item.type === "folder" ? onOpen : props.onPreview}
         className="flex min-w-0 items-center gap-3 text-left"
       >
-        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-[8px] bg-slate-100 text-slate-500">
+        <span className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-[8px]">
           {item.type === "folder" ? (
-            <Folder className="h-5 w-5" aria-hidden="true" />
-          ) : isImageItem(item) ? (
-            <ImageIcon className="h-5 w-5" aria-hidden="true" />
+            <span className="grid h-full w-full place-items-center bg-slate-100 text-slate-500">
+              <Folder className="h-5 w-5" aria-hidden="true" />
+            </span>
           ) : (
-            <FileText className="h-5 w-5" aria-hidden="true" />
+            <RowFileIcon item={item} />
           )}
         </span>
         <span className="min-w-0">
@@ -1949,14 +1944,15 @@ function PreviewDialog({
   onClose: () => void;
   onCopy: () => void;
 }) {
-  const preview = item.thumbnailUrl || item.url;
-
   return (
     <div>
       <div className="flex items-center justify-between gap-3 border-b border-slate-200 p-4">
         <div className="min-w-0">
           <h2 className="truncate text-base font-semibold text-slate-950">{item.name}</h2>
-          <p className="text-sm text-slate-500">{item.mimeType || item.type}</p>
+          <p className="text-sm text-slate-500">
+            {item.mimeType || item.type}
+            {item.size ? ` · ${formatBytes(item.size)}` : null}
+          </p>
         </div>
         <button
           type="button"
@@ -1967,20 +1963,8 @@ function PreviewDialog({
           <X className="h-4 w-4" aria-hidden="true" />
         </button>
       </div>
-      <div className="max-h-[70vh] overflow-auto bg-slate-100 p-4 media-scrollbar">
-        {preview && isImageItem(item) ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={preview}
-            alt={item.name}
-            className="mx-auto max-h-[58vh] rounded-[10px] object-contain"
-            loading="lazy"
-          />
-        ) : (
-          <div className="grid h-64 place-items-center rounded-[10px] bg-white">
-            <FileText className="h-16 w-16 text-slate-300" aria-hidden="true" />
-          </div>
-        )}
+      <div className="bg-slate-100">
+        <PreviewContent item={item} />
       </div>
       <div className="flex justify-end gap-2 border-t border-slate-200 bg-white p-4">
         {item.url ? (
@@ -2004,6 +1988,154 @@ function PreviewDialog({
           </button>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function PreviewContent({ item }: { item: MediaItem }) {
+  const kind = getFileKind(item);
+  const url = item.url;
+
+  if (!url) {
+    return (
+      <div className="grid h-64 place-items-center p-4">
+        <div className="text-center">
+          <FileTypeBadge item={item} size="md" />
+          <p className="mt-3 text-sm text-slate-600">Preview is not available for this item.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (kind === "image") {
+    return (
+      <div className="max-h-[70vh] overflow-auto p-4 media-scrollbar">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={item.thumbnailUrl || url}
+          alt={item.name}
+          className="mx-auto max-h-[60vh] rounded-[10px] object-contain"
+          loading="lazy"
+        />
+      </div>
+    );
+  }
+
+  if (kind === "video") {
+    return (
+      <div className="bg-black p-4">
+        <video
+          src={url}
+          controls
+          autoPlay={false}
+          playsInline
+          className="mx-auto block max-h-[60vh] w-full rounded-[10px] bg-black"
+        />
+      </div>
+    );
+  }
+
+  if (kind === "audio") {
+    return (
+      <div className="grid place-items-center p-8">
+        <FileTypeBadge item={item} size="md" />
+        <audio src={url} controls className="mt-6 w-full max-w-md" />
+      </div>
+    );
+  }
+
+  if (kind === "pdf") {
+    return (
+      <div className="h-[70vh] w-full bg-white">
+        <iframe
+          src={url}
+          title={item.name}
+          className="h-full w-full border-0"
+          loading="lazy"
+        />
+      </div>
+    );
+  }
+
+  if (kind === "text" || kind === "code") {
+    return <TextFilePreview key={url} item={item} url={url} />;
+  }
+
+  return (
+    <div className="grid place-items-center p-8">
+      <div className="text-center">
+        <FileTypeBadge item={item} size="md" />
+        <p className="mt-4 text-sm font-medium text-slate-700">
+          Inline preview is not supported for this file type.
+        </p>
+        <p className="mt-1 text-xs text-slate-500">
+          Use the Open button to download or view it in a new tab.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function TextFilePreview({ item, url }: { item: MediaItem; url: string }) {
+  const [content, setContent] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const MAX_BYTES = 200_000;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetch(url)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Failed to load (${response.status})`);
+        const blob = await response.blob();
+        const slice = blob.size > MAX_BYTES ? blob.slice(0, MAX_BYTES) : blob;
+        return slice.text();
+      })
+      .then((text) => {
+        if (cancelled) return;
+        setContent(text);
+      })
+      .catch((reason: unknown) => {
+        if (cancelled) return;
+        setError(reason instanceof Error ? reason.message : "Could not load preview.");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [url]);
+
+  if (error) {
+    return (
+      <div className="grid place-items-center p-8">
+        <div className="text-center">
+          <FileTypeBadge item={item} size="md" />
+          <p className="mt-4 text-sm text-red-600">{error}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (content === null) {
+    return (
+      <div className="grid h-64 place-items-center">
+        <Loader2 className="h-6 w-6 animate-spin text-slate-400" aria-hidden="true" />
+      </div>
+    );
+  }
+
+  const truncated = content.length >= MAX_BYTES;
+
+  return (
+    <div className="max-h-[70vh] overflow-auto bg-white p-4 media-scrollbar">
+      <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-5 text-slate-800">
+        {content}
+      </pre>
+      {truncated ? (
+        <p className="mt-3 text-xs italic text-slate-500">
+          Preview truncated. Open the file to see the full contents.
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -2059,11 +2191,219 @@ function mergeFolders(previous: MediaItem[], next: MediaItem[]) {
   return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function isImageItem(item: MediaItem) {
+type FileKind =
+  | "image"
+  | "video"
+  | "audio"
+  | "pdf"
+  | "code"
+  | "spreadsheet"
+  | "document"
+  | "presentation"
+  | "archive"
+  | "text"
+  | "other";
+
+function getFileExtension(name: string) {
+  const match = name.match(/\.([^./\\]+)$/);
+  return match ? match[1].toLowerCase() : "";
+}
+
+function getFileKind(item: MediaItem): FileKind {
+  const mime = item.mimeType?.toLowerCase() ?? "";
+  const ext = getFileExtension(item.name);
+
+  if (mime.startsWith("image/") || /^(png|jpe?g|gif|webp|svg|avif|bmp|ico|heic|heif)$/.test(ext)) {
+    return "image";
+  }
+  if (mime.startsWith("video/") || /^(mp4|webm|mov|m4v|avi|mkv|ogv)$/.test(ext)) {
+    return "video";
+  }
+  if (mime.startsWith("audio/") || /^(mp3|wav|ogg|m4a|aac|flac|opus)$/.test(ext)) {
+    return "audio";
+  }
+  if (mime === "application/pdf" || ext === "pdf") {
+    return "pdf";
+  }
+  if (
+    mime.includes("spreadsheet") ||
+    mime === "text/csv" ||
+    /^(xlsx?|xlsm|csv|tsv|ods|numbers)$/.test(ext)
+  ) {
+    return "spreadsheet";
+  }
+  if (mime.includes("presentation") || /^(pptx?|odp|key)$/.test(ext)) {
+    return "presentation";
+  }
+  if (
+    mime === "application/msword" ||
+    mime.includes("officedocument.wordprocessingml") ||
+    /^(docx?|odt|rtf|pages)$/.test(ext)
+  ) {
+    return "document";
+  }
+  if (
+    mime.includes("zip") ||
+    mime.includes("compressed") ||
+    mime.includes("archive") ||
+    /^(zip|rar|7z|tar|gz|bz2|xz|tgz)$/.test(ext)
+  ) {
+    return "archive";
+  }
+  if (
+    /^(js|jsx|ts|tsx|py|rb|go|java|c|cpp|h|hpp|cs|rs|php|swift|kt|scala|sh|bash|zsh|fish|sql|html?|css|scss|sass|less|json|xml|yaml|yml|toml|ini|md|mdx)$/.test(
+      ext,
+    )
+  ) {
+    return "code";
+  }
+  if (mime.startsWith("text/") || /^(txt|log|csv|tsv)$/.test(ext)) {
+    return "text";
+  }
+  return "other";
+}
+
+type FileTypeStyle = {
+  label: string;
+  bg: string;
+  text: string;
+  Icon: React.ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
+};
+
+function getFileTypeStyle(kind: FileKind): FileTypeStyle {
+  switch (kind) {
+    case "image":
+      return { label: "Image", bg: "bg-emerald-50", text: "text-emerald-600", Icon: FileImage };
+    case "video":
+      return { label: "Video", bg: "bg-violet-50", text: "text-violet-600", Icon: FileVideo };
+    case "audio":
+      return { label: "Audio", bg: "bg-fuchsia-50", text: "text-fuchsia-600", Icon: FileAudio };
+    case "pdf":
+      return { label: "PDF", bg: "bg-red-50", text: "text-red-600", Icon: FileText };
+    case "spreadsheet":
+      return {
+        label: "Spreadsheet",
+        bg: "bg-emerald-50",
+        text: "text-emerald-700",
+        Icon: FileSpreadsheet,
+      };
+    case "presentation":
+      return { label: "Slides", bg: "bg-orange-50", text: "text-orange-600", Icon: FileText };
+    case "document":
+      return { label: "Document", bg: "bg-blue-50", text: "text-blue-600", Icon: FileText };
+    case "archive":
+      return { label: "Archive", bg: "bg-amber-50", text: "text-amber-700", Icon: FileArchive };
+    case "code":
+      return { label: "Code", bg: "bg-slate-100", text: "text-slate-700", Icon: FileCode };
+    case "text":
+      return { label: "Text", bg: "bg-slate-100", text: "text-slate-600", Icon: FileText };
+    default:
+      return { label: "File", bg: "bg-slate-100", text: "text-slate-500", Icon: FileText };
+  }
+}
+
+function MediaThumbnail({ item }: { item: MediaItem }) {
+  const kind = getFileKind(item);
+  const preview = item.thumbnailUrl || item.url;
+
+  if (kind === "image" && preview) {
+    return (
+      <div
+        className="h-full w-full bg-cover bg-center transition-transform duration-300 group-hover:scale-[1.02]"
+        style={{
+          backgroundImage: `linear-gradient(to bottom, transparent 45%, rgba(15, 23, 42, 0.7)), url("${preview}")`,
+        }}
+      />
+    );
+  }
+
+  if (kind === "video" && item.url) {
+    return (
+      <div className="relative h-full w-full overflow-hidden bg-slate-900">
+        <video
+          src={item.url}
+          preload="metadata"
+          muted
+          playsInline
+          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+        />
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-950/20 transition group-hover:bg-slate-950/30">
+          <div className="grid h-12 w-12 place-items-center rounded-full bg-white/90 shadow-lg">
+            <svg viewBox="0 0 24 24" className="ml-1 h-6 w-6 fill-slate-900" aria-hidden="true">
+              <path d="M8 5.14v13.72L19 12 8 5.14Z" />
+            </svg>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (kind === "pdf" && item.url) {
+    return (
+      <div className="relative h-full w-full overflow-hidden bg-white">
+        <iframe
+          src={`${item.url}#toolbar=0&navpanes=0&scrollbar=0&view=FitH&zoom=page-width`}
+          title={item.name}
+          className="pointer-events-none absolute left-0 top-0 h-[250%] w-[250%] origin-top-left scale-[0.4] border-0"
+          loading="lazy"
+        />
+        <div className="pointer-events-none absolute right-2 top-2 rounded-[6px] bg-red-600 px-1.5 py-0.5 text-[10px] font-bold text-white shadow">
+          PDF
+        </div>
+      </div>
+    );
+  }
+
+  return <FileTypeBadge item={item} size="lg" />;
+}
+
+function RowFileIcon({ item }: { item: MediaItem }) {
+  const kind = getFileKind(item);
+  const preview = item.thumbnailUrl || item.url;
+
+  if (kind === "image" && preview) {
+    return (
+      <span
+        className="block h-full w-full bg-cover bg-center"
+        style={{ backgroundImage: `url("${preview}")` }}
+        aria-hidden="true"
+      />
+    );
+  }
+
+  const style = getFileTypeStyle(kind);
+  const Icon = style.Icon;
   return (
-    item.mimeType?.startsWith("image/") ||
-    /\.(png|jpe?g|gif|webp|svg|avif)$/i.test(item.name) ||
-    Boolean(item.thumbnailUrl)
+    <span className={`grid h-full w-full place-items-center ${style.bg}`}>
+      <Icon className={`h-5 w-5 ${style.text}`} aria-hidden={true} />
+    </span>
+  );
+}
+
+function FileTypeBadge({ item, size = "lg" }: { item: MediaItem; size?: "sm" | "md" | "lg" }) {
+  const kind = getFileKind(item);
+  const style = getFileTypeStyle(kind);
+  const ext = getFileExtension(item.name) || style.label.toLowerCase();
+  const Icon = style.Icon;
+
+  const dimensions =
+    size === "sm"
+      ? { wrap: "h-10 w-10", icon: "h-5 w-5", text: "hidden" }
+      : size === "md"
+        ? { wrap: "h-16 w-16", icon: "h-8 w-8", text: "text-[10px] mt-1" }
+        : { wrap: "h-20 w-20", icon: "h-10 w-10", text: "text-xs mt-1.5" };
+
+  return (
+    <div className={`flex h-full w-full items-center justify-center ${style.bg}`}>
+      <div className={`flex flex-col items-center justify-center rounded-[12px] ${dimensions.wrap}`}>
+        <Icon className={`${dimensions.icon} ${style.text}`} aria-hidden={true} />
+        {size !== "sm" ? (
+          <span className={`${dimensions.text} font-semibold uppercase tracking-wide ${style.text}`}>
+            {ext.length <= 5 ? ext : style.label}
+          </span>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
