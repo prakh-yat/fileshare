@@ -88,12 +88,12 @@ export function ResetPasswordForm() {
         <section className="w-full overflow-hidden rounded-[12px] border border-slate-200 bg-white p-8 shadow-sm">
           <div className="mb-6 flex items-center justify-center">
             <Image
-              src="/tda-main-logo-white-horizontal-400x140.png"
-              alt="TDA logo"
-              width={140}
-              height={48}
+              src="/cpm-logo.png"
+              alt="Creative Print and Marketing logo"
+              width={180}
+              height={45}
               priority
-              className="h-auto w-[140px]"
+              className="h-auto w-[180px]"
             />
           </div>
 

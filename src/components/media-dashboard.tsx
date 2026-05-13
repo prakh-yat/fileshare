@@ -791,12 +791,12 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
             </div>
           ) : (
             <Image
-              src="/tda-main-logo-white-horizontal-400x140.png"
-              alt="TDA logo"
-              width={148}
-              height={52}
+              src="/cpm-logo.png"
+              alt="Creative Print and Marketing logo"
+              width={160}
+              height={40}
               priority
-              className="h-auto w-[148px]"
+              className="h-auto w-[160px]"
             />
           )}
         </div>

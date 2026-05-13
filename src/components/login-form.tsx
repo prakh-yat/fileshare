@@ -122,12 +122,12 @@ export function LoginForm({ initialError }: { initialError?: string }) {
           <div className="hidden min-h-[560px] flex-col justify-between bg-[#263244] p-8 text-white md:p-12 lg:flex">
             <div>
               <Image
-                src="/tda-main-logo-white-horizontal-400x140.png"
-                alt="TDA logo"
-                width={172}
-                height={60}
+                src="/cpm-logo.png"
+                alt="Creative Print and Marketing logo"
+                width={200}
+                height={50}
                 priority
-                className="h-auto w-[172px]"
+                className="h-auto w-[200px]"
               />
             </div>
             <div className="space-y-3">
@@ -171,12 +171,12 @@ export function LoginForm({ initialError }: { initialError?: string }) {
               <form onSubmit={handleSubmit} className="w-full max-w-sm" noValidate>
                 <div className="mb-8 flex items-center justify-center lg:hidden">
                   <Image
-                    src="/tda-main-logo-white-horizontal-400x140.png"
-                    alt="TDA logo"
-                    width={140}
-                    height={48}
+                    src="/cpm-logo.png"
+                    alt="Creative Print and Marketing logo"
+                    width={180}
+                    height={45}
                     priority
-                    className="h-auto w-[140px]"
+                    className="h-auto w-[180px]"
                   />
                 </div>
                 <h2 className="text-3xl font-semibold tracking-tight text-slate-950">
