@@ -786,9 +786,14 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
       >
         <div className="flex h-20 items-center justify-center border-b border-white/10 px-4">
           {collapsed ? (
-            <div className="grid h-10 w-10 place-items-center rounded-[8px] bg-blue-700 text-sm font-semibold text-white">
-              T
-            </div>
+            <Image
+              src="/cpm-logo-square.png"
+              alt="Creative Print and Marketing logo"
+              width={44}
+              height={44}
+              priority
+              className="h-11 w-11"
+            />
           ) : (
             <Image
               src="/cpm-logo.png"
