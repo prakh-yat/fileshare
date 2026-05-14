@@ -90,10 +90,10 @@ export function ResetPasswordForm() {
             <Image
               src="/cpm-logo.png"
               alt="Creative Print and Marketing logo"
-              width={180}
-              height={45}
+              width={110}
+              height={110}
               priority
-              className="h-auto w-[180px]"
+              className="h-[110px] w-[110px]"
             />
           </div>
 

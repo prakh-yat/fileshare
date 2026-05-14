@@ -124,10 +124,10 @@ export function LoginForm({ initialError }: { initialError?: string }) {
               <Image
                 src="/cpm-logo.png"
                 alt="Creative Print and Marketing logo"
-                width={200}
-                height={50}
+                width={140}
+                height={140}
                 priority
-                className="h-auto w-[200px]"
+                className="h-[140px] w-[140px]"
               />
             </div>
             <div className="space-y-3">
@@ -173,10 +173,10 @@ export function LoginForm({ initialError }: { initialError?: string }) {
                   <Image
                     src="/cpm-logo.png"
                     alt="Creative Print and Marketing logo"
-                    width={180}
-                    height={45}
+                    width={110}
+                    height={110}
                     priority
-                    className="h-auto w-[180px]"
+                    className="h-[110px] w-[110px]"
                   />
                 </div>
                 <h2 className="text-3xl font-semibold tracking-tight text-slate-950">

@@ -798,10 +798,10 @@ export function MediaDashboard({ initialStorageReady, currentUser }: MediaDashbo
             <Image
               src="/cpm-logo.png"
               alt="Creative Print and Marketing logo"
-              width={160}
-              height={40}
+              width={60}
+              height={60}
               priority
-              className="h-auto w-[160px]"
+              className="h-[60px] w-[60px]"
             />
           )}
         </div>
